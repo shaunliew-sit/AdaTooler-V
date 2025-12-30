@@ -9,7 +9,7 @@ trust_remote_code: true
 ### method
 stage: sft
 do_train: true
-finetuning_type: full
+finetuning_type: lora
 freeze_vision_tower: true
 freeze_multi_modal_projector: true
 freeze_language_model: false
