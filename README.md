@@ -20,11 +20,7 @@ commercial proprietary model GPT-4o and Gemini 1.5 Pro.**
   <img src="./images/bar.png" alt="Descriptive alt text" width="80%">
 </div>
 
-## 📝 TODO
-- [x] Release the RL Traing data
-- [x] Release the SFT Traing data
-- [x] Release the SFT Model
-- [ ] Release the eval data (in one week)
+
 
 ## 🔍 Dataset
 
