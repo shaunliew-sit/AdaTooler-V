@@ -2,7 +2,7 @@
 
 [[📖 Paper](https://arxiv.org/pdf/2512.16918)] [[🤗 AdaTooler-V-7B-model](https://huggingface.co/AdaTooler-V/AdaTooler-V-7B)] 
 [[🤗 AdaTooler-V-SFT-model](https://huggingface.co/AdaTooler-V/AdaTooler-V-SFT-model)] 
-[[🤗 AdaTooler-V-train-data](https://huggingface.co/datasets/AdaTooler-V/AdaTooler-V-300k)] [[🤗 AdaTooler-V-eval](https://huggingface.co/datasets/AdaTooler-V/AdaTooler-V-eval)]
+[[🤗 AdaTooler-V-train-data](https://huggingface.co/datasets/AdaTooler-V/AdaTooler-V-train-data)] [[🤗 AdaTooler-V-eval](https://huggingface.co/datasets/AdaTooler-V/AdaTooler-V-eval)]
 
 
 
@@ -87,9 +87,9 @@ pip install "flash-attn==2.8.3" --no-build-isolation
 
 We recommend to use the popular [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory) to perform SFT on our cold-start data.
 1. Install [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory).
-2. Use the script `scripts/preprocess_coldstart.py` to download [AdaTooler-V-CoT-100k](ChaoyangWang/AdaTooler-V-CoT-100k) and produce the required data format by LLaMA-Factory. This script automatically extracts images and generates a JSON file from the original parquet-format dataset.
+2. Use the script `scripts/preprocess_coldstart.py` to download [AdaTooler-V-train-data](https://huggingface.co/datasets/AdaTooler-V/AdaTooler-V-train-data) and produce the required data format by LLaMA-Factory. This script automatically extracts images and generates a JSON file from the original parquet-format dataset.
 ```
-python3 scripts/preprocess_coldstart.py --dataset_path ChaoyangWang/AdaTooler-V-CoT-100k --output_dir [YOUR_DATASET_FOLDER]
+python3 scripts/preprocess_coldstart.py --dataset_path AdaTooler-V/AdaTooler-V-train-data --output_dir [YOUR_DATASET_FOLDER]
 ```
 3. After processing, please follow the instructions in LLaMA-Factory to configure the cold-start data in `data/dataset_info.json`, as shown below, then copy the config file `sft_configs/qwen2.5-vl.yaml` into your LLaMA-Factory codebase.
 ```
