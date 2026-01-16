@@ -2,7 +2,7 @@
 
 [[📖 Paper](https://arxiv.org/pdf/2512.16918)] [[🤗 AdaTooler-V-7B-model](https://huggingface.co/AdaTooler-V/AdaTooler-V-7B)] 
 [[🤗 AdaTooler-V-SFT-model](https://huggingface.co/AdaTooler-V/AdaTooler-V-SFT-model)] 
-[[🤗 AdaTooler-V-train-data](https://huggingface.co/datasets/AdaTooler-V/AdaTooler-V-train-data)] [[🤗 AdaTooler-V-eval](https://huggingface.co/datasets/AdaTooler-V/AdaTooler-V-eval)]
+[[🤗 AdaTooler-V-train-data (SFT and RL)](https://huggingface.co/datasets/AdaTooler-V/AdaTooler-V-train-data)] [[🤗 AdaTooler-V-eval](https://huggingface.co/datasets/AdaTooler-V/AdaTooler-V-eval)]
 
 
 
