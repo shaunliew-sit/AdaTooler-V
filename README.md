@@ -84,17 +84,11 @@ pip install "flash-attn==2.8.3" --no-build-isolation
 
 ## 🚀 Training
 ### Stage 1: Cold-start Supervised Fine-tuning (SFT)
-
-We recommend to use the popular [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory) to perform SFT on our cold-start data.
 1. Install [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory).
-2. Use the script `scripts/preprocess_coldstart.py` to download [AdaTooler-V-train-data](https://huggingface.co/datasets/AdaTooler-V/AdaTooler-V-train-data) and produce the required data format by LLaMA-Factory. This script automatically extracts images and generates a JSON file from the original parquet-format dataset.
+2. Follow the instructions in LLaMA-Factory to configure the cold-start data in `data/dataset_info.json`, as shown below, then copy the config file `sftconfig/qwen2_5vl_full_sft.yaml` into your LLaMA-Factory codebase. SFT data in [AdaTooler-V-train-data](https://huggingface.co/datasets/AdaTooler-V/AdaTooler-V-train-data).
 ```
-python3 scripts/preprocess_coldstart.py --dataset_path AdaTooler-V/AdaTooler-V-train-data --output_dir [YOUR_DATASET_FOLDER]
-```
-3. After processing, please follow the instructions in LLaMA-Factory to configure the cold-start data in `data/dataset_info.json`, as shown below, then copy the config file `sft_configs/qwen2.5-vl.yaml` into your LLaMA-Factory codebase.
-```
-"AdaTooler-V-CoT-100k": {
-  "file_name": "[YOUR_DATASET_FOLDER]/AdaTooler-V-CoT-100k.json",
+"adatooler_v_sft": {
+  "file_name": "[YOUR_DATASET_FOLDER]/adatooler_v_sft.json",
   "formatting": "sharegpt",
   "columns": {
     "messages": "conversations",
@@ -111,8 +105,9 @@ python3 scripts/preprocess_coldstart.py --dataset_path AdaTooler-V/AdaTooler-V-t
 ```
 4. Train Cold-start data with the training configs.
 ```
-llamafactory-cli train sft_configs/qwen2.5-vl.yaml
+llamafactory-cli train sft_configs/qwen2_5vl_full_sft.yaml
 ```
+
 
 ### Stage 2: Reinforcement Learning (RL)
 #### Data Preprocessing
