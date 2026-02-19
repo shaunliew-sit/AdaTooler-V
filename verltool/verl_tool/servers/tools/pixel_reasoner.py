@@ -112,7 +112,7 @@ class PixelReasonerTool(BaseTool):
     tool_type = "pixel_reasoner"
 
     stop_tokens = ["</tool_call>"]
-    valid_mcp_func_names = ['zoom_in', 'crop_image_normalized', 'VideoClip', 'crop_image', 'PathTracer', 'FrameAt']
+    valid_mcp_func_names = ['zoom_in', 'crop_image_normalized', 'VideoClip', 'crop_image', 'PathTracer', 'FrameAt', 'zoom_out']
 
     def __init__(self, num_workers=1):
         super().__init__(num_workers)
@@ -445,6 +445,9 @@ class PixelReasonerTool(BaseTool):
                     observation = f"Error processing PathTracer action: {str(e)}"
                     valid = False
                     print(f"Error processing PathTracer action: {str(e)}; parameters: {parsed_action['arguments']}")
+            elif parsed_action['name'] == 'zoom_out':
+                observation = "Returned to the full original image view."
+                valid = True
             else:
                 observation = "Unknown action name."
                 valid = False

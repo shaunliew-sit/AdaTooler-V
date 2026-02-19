@@ -1,0 +1,8 @@
+checkpoints/
+.venv/
+.pytest_cache/
+.claude/
+service-account-gcs.json
+.python-version
+pyproject.toml
+uv.lock
