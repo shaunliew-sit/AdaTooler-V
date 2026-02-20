@@ -1,0 +1,51 @@
+#!/bin/bash
+#PBS -q ai
+#PBS -N qwen3vl-hoi-grpo
+#PBS -l select=1:ngpus=8
+#PBS -l walltime=48:00:00
+#PBS -j oe
+#PBS -P 31100001
+
+# ── Enter working directory ──
+cd /home/users/sit/a104059/scratch/AdaTooler-V/verltool
+
+# ── Load environment ──
+module load miniforge3
+source activate verl-tool-env
+module load cuda/12.2.2
+
+# ── Print diagnostics ──
+echo "=== Job Info ==="
+echo "Job ID: $PBS_JOBID"
+echo "Node:   $(hostname)"
+echo "Date:   $(date)"
+echo "PWD:    $(pwd)"
+echo ""
+nvidia-smi
+echo ""
+python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}, GPUs: {torch.cuda.device_count()}')"
+echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+echo ""
+
+# ── Count GPUs (assigned by PBS) ──
+NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
+echo "Using $NUM_GPUS GPUs"
+
+# ── Set environment variables ──
+export LD_LIBRARY_PATH=/home/users/sit/a104059/.conda/envs/verl-tool-env/lib:$LD_LIBRARY_PATH
+export NCCL_DEBUG=INFO
+export WANDB_PROJECT=SDS-GRPO
+
+# ── Model path ──
+MODEL_PATH=/home/users/sit/a104059/scratch/checkpoints/qwen3-vl-8b
+
+echo "=== Starting GRPO Training ==="
+echo "Model: $MODEL_PATH"
+echo "Data:  $(pwd)/data/hoi/"
+echo ""
+
+# ── Run training ──
+bash examples/train/hoi/train_qwen3vl.sh $MODEL_PATH
+
+echo "=== Training Complete ==="
+echo "End: $(date)"
