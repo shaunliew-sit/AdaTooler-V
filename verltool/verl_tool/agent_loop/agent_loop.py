@@ -561,6 +561,16 @@ class AgentLoopWorker:
                 prompt_output["input_ids"] = prompt_output["input_ids"].unsqueeze(0)
                 prompt_output["attention_mask"] = prompt_output["attention_mask"].unsqueeze(0)
 
+            # tokenizer.pad only pads shorter sequences; it never truncates longer ones.
+            # Enforce the max length explicitly so every trajectory produces a tensor of
+            # the same width, preventing DataProto.concat failures when workers see
+            # different prompt lengths.  With left-padding, keeping the rightmost tokens
+            # preserves the image + question and drops early system-prompt text.
+            _prompt_max_len = self.config.actor_rollout_ref.rollout.prompt_length
+            if prompt_output["input_ids"].shape[1] > _prompt_max_len:
+                prompt_output["input_ids"] = prompt_output["input_ids"][:, -_prompt_max_len:]
+                prompt_output["attention_mask"] = prompt_output["attention_mask"][:, -_prompt_max_len:]
+
             self.tokenizer.padding_side = "right"
             response_output = self.tokenizer.pad(
                 {"input_ids": output.response_ids},

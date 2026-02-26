@@ -197,7 +197,7 @@ def _meteor_score(pred: str, ref: str) -> float:
         import nltk
         from nltk.translate.meteor_score import single_meteor_score
         return single_meteor_score(ref.split(), pred.split())
-    except (ImportError, LookupError, TypeError):
+    except (ImportError, LookupError, TypeError, AttributeError, AssertionError):
         pass
 
     # Fallback: unigram F1 with fragmentation penalty
@@ -447,6 +447,21 @@ class SDSGRPORewardManager:
         self.gamma = 2.0              # Gaussian decay steepness
         self.lambda_abstain = 0.1     # per-zoom_in penalty on easy images
         self.lambda_hygiene = 0.05    # zoom_out hygiene bonus
+
+        # Pre-warm NLTK WordNet corpus so it is loaded into memory before
+        # concurrent RewardManagerWorker threads call single_meteor_score.
+        # NLTK's ZipFilePathPointer.read() is not thread-safe; concurrent access
+        # triggers "assert self.fp is None" (AssertionError).  Loading once here
+        # caches the corpus data and prevents the race condition.
+        try:
+            from nltk.corpus import wordnet as _wn
+            _wn.ensure_loaded()
+        except Exception:
+            try:
+                from nltk.corpus import wordnet as _wn
+                _wn.synsets("test")  # fallback for NLTK versions without ensure_loaded
+            except Exception:
+                pass
 
     def __call__(self, data: DataProto, return_dict: bool = False):
         if "rm_scores" in data.batch.keys():

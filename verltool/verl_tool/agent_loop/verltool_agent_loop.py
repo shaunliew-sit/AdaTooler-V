@@ -787,6 +787,61 @@ class VerlToolAgentLoop(AgentLoopBase):
         for i, logp in enumerate(stats_dict["action_logps"]):
             verl_tool_metrics[f"turn_{i+1}_action_logp"] = logp
         
+        # Trim running_image_data to only include complete image groups that are
+        # fully present in the truncated sequence (prompt + response[:response_length]).
+        # When accumulated response tokens (actions + observations) overflow
+        # max_response_length, the response_ids[:self.response_length] slice can
+        # cut image tokens mid-block. The full image still in running_image_data then
+        # causes image_grid_thw to expect more tokens than actually in input_ids,
+        # producing a RoPE position_ids shape mismatch crash in get_rope_index.
+        #
+        # We also track where any partial image block starts in the response so we
+        # can further truncate response_ids to BEFORE that block.  This ensures that
+        # get_rope_index (which counts image blocks from raw input_ids tokens, not from
+        # the images list) sees exactly n_complete_images image blocks — matching the
+        # trimmed images list and preventing the IndexError.
+        partial_block_start_in_response = None  # offset into response_ids of any partial block
+        if running_image_data is not None:
+            vision_start_id = self.tokenizer.convert_tokens_to_ids("<|vision_start|>")
+            image_pad_id = self.tokenizer.convert_tokens_to_ids("<|image_pad|>")
+            vision_end_id = self.tokenizer.convert_tokens_to_ids("<|vision_end|>")
+            truncated_sequence = list(prompt_ids) + list(response_ids[: self.response_length])
+            n_complete_images = 0
+            i = 0
+            while i < len(truncated_sequence) - 1:
+                if truncated_sequence[i] == vision_start_id and truncated_sequence[i + 1] == image_pad_id:
+                    block_start = i
+                    j = i + 2
+                    while j < len(truncated_sequence) and truncated_sequence[j] == image_pad_id:
+                        j += 1
+                    if j < len(truncated_sequence) and truncated_sequence[j] == vision_end_id:
+                        n_complete_images += 1
+                        partial_block_start_in_response = None  # reset: this block was complete
+                        i = j + 1
+                    else:
+                        # Partial image block — record its start position in the response
+                        if block_start >= len(prompt_ids):
+                            partial_block_start_in_response = block_start - len(prompt_ids)
+                        i = j  # skip
+                else:
+                    i += 1
+            if len(running_image_data) != n_complete_images:
+                logger.debug(
+                    f"Trimming running_image_data from {len(running_image_data)} to {n_complete_images} "
+                    f"(response overflow cut {len(running_image_data) - n_complete_images} partial image(s))"
+                )
+                running_image_data = running_image_data[:n_complete_images]
+
+        # Further truncate response_ids to remove any trailing partial image block so
+        # that the token sequence and the images list stay in sync.
+        effective_response_length = self.response_length
+        if partial_block_start_in_response is not None:
+            effective_response_length = partial_block_start_in_response
+            logger.debug(
+                f"Truncating response from {self.response_length} to {effective_response_length} "
+                f"to remove partial image block starting at response offset {partial_block_start_in_response}"
+            )
+
         multi_modal_output = {}
         if running_image_data is not None:
             multi_modal_output["image"] = running_image_data
@@ -795,9 +850,9 @@ class VerlToolAgentLoop(AgentLoopBase):
 
         output = AgentLoopOutput(
             prompt_ids=prompt_ids,
-            response_ids=response_ids[: self.response_length],
-            response_mask=response_mask[: self.response_length],
-            response_logprobs=response_logprobs[: self.response_length],
+            response_ids=response_ids[: effective_response_length],
+            response_mask=response_mask[: effective_response_length],
+            response_logprobs=response_logprobs[: effective_response_length],
             multi_modal_data=multi_modal_output,
             num_turns=stats_dict["num_turns"],
             metrics=metrics,

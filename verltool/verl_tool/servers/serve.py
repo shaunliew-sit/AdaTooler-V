@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # Configuration constants
 MAX_CONCURRENCY_PER_UVI_WORKER = 256
 ROUTER_BACKLOG = 8192      # Backlog for the router
-HEALTH_CHECK_TIMEOUT = 60.0
+HEALTH_CHECK_TIMEOUT = 300.0
 HEALTH_CHECK_INTERVAL = 0.5
 SUBPROCESS_TERMINATE_TIMEOUT = 10
 

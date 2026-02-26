@@ -7,9 +7,9 @@ def download_flat_from_gcs():
     # --- CONFIGURATION ---
     BUCKET_NAME = "hoi-sit"
     # Specific GCS folder path
-    PREFIX = "qwen3VL-2B/hoi_v2_sft_2/" 
+    PREFIX = "qwen3VL-8B/hoi_v2_sft/" 
     # Your local destination
-    DESTINATION_DIR = "/media/shaun/workspace/AdaTooler-V/checkpoints/qwen3VL-2B"
+    DESTINATION_DIR = "/media/shaun/workspace/AdaTooler-V/checkpoints/qwen3VL-8B"
     KEY_PATH = "/media/shaun/workspace/AdaTooler-V/service-account-gcs.json"
 
     # 1. Authenticate

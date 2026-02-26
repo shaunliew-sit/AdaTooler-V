@@ -1,16 +1,34 @@
 #!/bin/bash
-# SDS-GRPO Training for HOI (Qwen3-VL-8B)
+# SDS-GRPO Training for HOI (Qwen3-VL-4B)
 #
 # Usage:
 #   cd verltool
 #   bash examples/train/hoi/train_qwen3vl.sh [MODEL_PATH]
 #
-# Requires 8x H100/A100 GPUs (80GB).
+# 
 set -x
 unset ROCR_VISIBLE_DEVICES
 
+# ── Kill stale Ray actors / GPU contexts from previous failed runs ──
+ray stop --force 2>/dev/null || true
+sleep 2
+
+# ── Fix PBS UUID-based CUDA_VISIBLE_DEVICES for vllm compatibility ──
+# PBS assigns GPUs as UUIDs (e.g. GPU-4f6613e0-...) but vllm requires integer indices (0,1,2,...)
+if [[ "$CUDA_VISIBLE_DEVICES" == *"GPU-"* ]]; then
+    NEW_IDS=""
+    IFS=',' read -ra UUIDS <<< "$CUDA_VISIBLE_DEVICES"
+    for uuid in "${UUIDS[@]}"; do
+        idx=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits \
+              | grep "$uuid" | awk -F',' '{print $1}' | tr -d ' ')
+        NEW_IDS="${NEW_IDS},${idx}"
+    done
+    export CUDA_VISIBLE_DEVICES="${NEW_IDS#,}"
+    echo "Remapped CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
+fi
+
 # Model — override via first CLI argument
-model_name=${1:-"/media/shaun/workspace/hoi/spatial_linking_training/outputs/sft-spatial-linking-model-merged"}
+model_name=${1:-"/home/users/sit/a104059/scratch/checkpoints/qwen3-vl-4b"}
 
 # Data
 train_data=[$(pwd)/data/hoi/train.parquet]
@@ -20,14 +38,15 @@ val_data=[$(pwd)/data/hoi/val.parquet]
 rl_alg=grpo
 reward_manager=SDS-GRPO
 n=4
-batch_size=16
-ppo_mini_batch_size=16
+batch_size=8
+ppo_mini_batch_size=8
 
 # Sequence lengths
 max_prompt_length=8192
 max_response_length=4096
 max_action_length=2048
 max_obs_length=8192
+free_cache_engine=True
 ppo_max_token_len_per_gpu=$(expr $max_prompt_length + $max_response_length)
 
 # Sampling
@@ -53,8 +72,8 @@ kl_loss_type=low_var_kl
 n_gpus_per_node=8
 n_nodes=1
 tensor_model_parallel_size=2
-gpu_memory_utilization=0.45
-do_offload=False
+gpu_memory_utilization=0.40
+do_offload=True
 use_dynamic_bsz=True
 ulysses_sequence_parallel_size=1
 fsdp_size=-1
@@ -70,7 +89,7 @@ rollout_mode='async'
 
 # Run name
 model_pretty_name=$(echo $model_name | tr '/' '_' | tr '[:upper:]' '[:lower:]')
-run_name="${reward_manager}-${strategy}-agent-${model_pretty_name}-${rl_alg}-n${n}-b${batch_size}-t${temperature}-lr${lr}"
+run_name="${reward_manager}-${strategy}-tool-agent-${model_pretty_name}-${rl_alg}-n${n}-b${batch_size}-t${temperature}-lr${lr}"
 export VERL_RUN_ID=$run_name
 export NCCL_DEBUG=INFO
 export VLLM_USE_V1=1
@@ -141,7 +160,7 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$tensor_model_parallel_size \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$log_prob_micro_batch_size_per_gpu \
     actor_rollout_ref.rollout.enforce_eager=True \
-    actor_rollout_ref.rollout.free_cache_engine=False \
+    actor_rollout_ref.rollout.free_cache_engine=$free_cache_engine \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=$gpu_memory_utilization \
     actor_rollout_ref.rollout.temperature=$temperature \
@@ -172,7 +191,7 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     trainer.rollout_data_dir=$(pwd)/verl_step_records/$run_name \
     trainer.nnodes=$n_nodes \
     +trainer.remove_previous_ckpt_in_save=True \
-    trainer.save_freq=10 \
+    trainer.save_freq=20 \
     trainer.test_freq=10 \
     trainer.total_epochs=100 \
     trainer.total_training_steps=1000 \
