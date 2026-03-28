@@ -2,17 +2,19 @@
 #PBS -q ai
 #PBS -N qwen3vl-hoi-grpo
 #PBS -l select=1:ngpus=8
-#PBS -l walltime=48:00:00
+#PBS -l walltime=24:00:00
 #PBS -j oe
 #PBS -P 31100001
 
 # ── Enter working directory ──
-cd /home/users/sit/a104059/scratch/AdaTooler-V/verltool
+cd ${PBS_O_WORKDIR:-/home/users/sit/a104059/scratch/AdaTooler-V/verltool}
 
 # ── Load environment ──
 module load miniforge3
-source activate verl-tool-env
 module load cuda/12.2.2
+module load gcc/11.2.0-nscc
+conda activate verl-tool-env
+
 
 # ── Print diagnostics ──
 echo "=== Job Info ==="
@@ -35,9 +37,12 @@ echo "Using $NUM_GPUS GPUs"
 export LD_LIBRARY_PATH=/home/users/sit/a104059/.conda/envs/verl-tool-env/lib:$LD_LIBRARY_PATH
 export NCCL_DEBUG=INFO
 export WANDB_PROJECT=SDS-GRPO
+# Prevent huggingface_hub from validating local model paths as HF repo IDs
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
 
 # ── Model path ──
-MODEL_PATH=/home/users/sit/a104059/scratch/checkpoints/qwen3-vl-8b
+MODEL_PATH=/home/users/sit/a104059/scratch/AdaTooler-V/verltool/checkpoints/SDS-GRPO/SDS-GRPO-fsdp-tool-agent-actor_huggingface_/global_step_820/actor/huggingface
 
 echo "=== Starting GRPO Training ==="
 echo "Model: $MODEL_PATH"

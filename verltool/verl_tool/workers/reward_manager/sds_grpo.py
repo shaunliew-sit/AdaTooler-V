@@ -38,6 +38,8 @@ from verl.workers.reward_manager import register
 
 def calculate_iou(box1: list[float], box2: list[float]) -> float:
     """Compute IoU between two [x1, y1, x2, y2] boxes."""
+    if len(box1) < 4 or len(box2) < 4:
+        return 0.0
     x1 = max(box1[0], box2[0])
     y1 = max(box1[1], box2[1])
     x2 = min(box1[2], box2[2])
@@ -111,7 +113,13 @@ def parse_grounding_answer(text: str) -> list[list[dict]]:
         try:
             parsed = json.loads(line)
             if isinstance(parsed, list) and len(parsed) == 2:
-                if all(isinstance(d, dict) and "bbox_2d" in d for d in parsed):
+                if all(
+                    isinstance(d, dict)
+                    and "bbox_2d" in d
+                    and isinstance(d["bbox_2d"], list)
+                    and len(d["bbox_2d"]) == 4
+                    for d in parsed
+                ):
                     pairs.append(parsed)
         except (json.JSONDecodeError, TypeError):
             continue
@@ -197,7 +205,7 @@ def _meteor_score(pred: str, ref: str) -> float:
         import nltk
         from nltk.translate.meteor_score import single_meteor_score
         return single_meteor_score(ref.split(), pred.split())
-    except (ImportError, LookupError, TypeError):
+    except (ImportError, LookupError, TypeError, AttributeError, AssertionError):
         pass
 
     # Fallback: unigram F1 with fragmentation penalty
@@ -447,6 +455,21 @@ class SDSGRPORewardManager:
         self.gamma = 2.0              # Gaussian decay steepness
         self.lambda_abstain = 0.1     # per-zoom_in penalty on easy images
         self.lambda_hygiene = 0.05    # zoom_out hygiene bonus
+
+        # Pre-warm NLTK WordNet corpus so it is loaded into memory before
+        # concurrent RewardManagerWorker threads call single_meteor_score.
+        # NLTK's ZipFilePathPointer.read() is not thread-safe; concurrent access
+        # triggers "assert self.fp is None" (AssertionError).  Loading once here
+        # caches the corpus data and prevents the race condition.
+        try:
+            from nltk.corpus import wordnet as _wn
+            _wn.ensure_loaded()
+        except Exception:
+            try:
+                from nltk.corpus import wordnet as _wn
+                _wn.synsets("test")  # fallback for NLTK versions without ensure_loaded
+            except Exception:
+                pass
 
     def __call__(self, data: DataProto, return_dict: bool = False):
         if "rm_scores" in data.batch.keys():
