@@ -8,10 +8,10 @@ and outputs train/val parquet files.
 Usage:
     cd verltool
     python examples/data_preprocess/hoi/prepare_train.py \
-        --data_dir /media/shaun/workspace/hoi/dataset/benchmarks_simplified \
-        --hico_img_dir /media/shaun/workspace/hoi/dataset/hico_20160224_det/images/train2015 \
-        --swig_img_dir /media/shaun/workspace/hoi/dataset/swig_hoi/images_512 \
-        --proposals_dir /media/shaun/workspace/hoi-dataset-curation/output/proposals \
+        --data_dir /workspace/Groma/groma_data/benchmarks_simplified \
+        --hico_img_dir /workspace/data/hico_20160224_det/images/train2015 \
+        --swig_img_dir /workspace/data/swig_hoi/images_512 \
+        --proposals_dir /workspace/hoi-tool-use-checkpoints/test_proposals \
         --local_dir data/hoi \
         --max_pairs 15 \
         --filter_len 8192

@@ -28,18 +28,18 @@ if [[ "$CUDA_VISIBLE_DEVICES" == *"GPU-"* ]]; then
 fi
 
 # Model — override via first CLI argument
-model_name=${1:-"/home/users/sit/a104059/scratch/checkpoints/qwen3-vl-4b"}
+model_name=${1:-"/workspace/AdaTooler-V/verltool/checkpoints/SDS-GRPO/SDS-GRPO-fsdp-tool-agent-actor_huggingface_/global_step_30/actor/huggingface"}
 
 # Data
-train_data=[$(pwd)/data/hoi/train.parquet]
-val_data=[$(pwd)/data/hoi/val.parquet]
+train_data=[$(pwd)/data/train.parquet]
+val_data=[$(pwd)/data/val.parquet]
 
 # RL config
 rl_alg=grpo
 reward_manager=SDS-GRPO
 n=4
-batch_size=8
-ppo_mini_batch_size=8
+batch_size=18
+ppo_mini_batch_size=18
 
 # Sequence lengths
 max_prompt_length=8192
@@ -69,22 +69,22 @@ entropy_coeff=0
 kl_loss_type=low_var_kl
 
 # GPU config
-n_gpus_per_node=8
+n_gpus_per_node=3
 n_nodes=1
-tensor_model_parallel_size=2
-gpu_memory_utilization=0.40
-do_offload=True
+tensor_model_parallel_size=1
+gpu_memory_utilization=0.70
+do_offload=False
 use_dynamic_bsz=True
 ulysses_sequence_parallel_size=1
 fsdp_size=-1
 
 # Micro batch sizes
-ppo_micro_batch_size_per_gpu=1
-log_prob_micro_batch_size_per_gpu=1
+ppo_micro_batch_size_per_gpu=12
+log_prob_micro_batch_size_per_gpu=12
 
 # Misc
 additional_eos_token_ids=[151645]  # <|im_end|>
-max_num_batched_tokens=10000
+max_num_batched_tokens=20000
 rollout_mode='async'
 
 # Run name
@@ -120,7 +120,7 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     data.val_files=$val_data \
     data.train_batch_size=$batch_size \
     data.val_batch_size=64 \
-    data.dataloader_num_workers=4 \
+    data.dataloader_num_workers=0\
     data.max_prompt_length=$max_prompt_length \
     data.max_response_length=$max_response_length \
     data.filter_overlong_prompts=False \
@@ -171,7 +171,7 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     actor_rollout_ref.rollout.top_k=-1 \
     actor_rollout_ref.rollout.n=$n \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=$use_dynamic_bsz \
-    actor_rollout_ref.rollout.max_num_seqs=64 \
+    actor_rollout_ref.rollout.max_num_seqs=256 \
     actor_rollout_ref.rollout.mode=$rollout_mode \
     actor_rollout_ref.rollout.max_num_batched_tokens=$max_num_batched_tokens \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=$use_dynamic_bsz \
@@ -188,18 +188,19 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     trainer.logger=['console','wandb'] \
     trainer.project_name=$reward_manager \
     trainer.experiment_name=$run_name \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.default_hdfs_dir=null \
     trainer.n_gpus_per_node=$n_gpus_per_node \
     trainer.rollout_data_dir=$(pwd)/verl_step_records/$run_name \
     trainer.nnodes=$n_nodes \
     +trainer.remove_previous_ckpt_in_save=True \
-    trainer.save_freq=20 \
+    trainer.save_freq=5 \
     trainer.test_freq=10 \
     trainer.total_epochs=100 \
     trainer.total_training_steps=1000 \
-    trainer.resume_mode=resume_path \
-    trainer.resume_from_path=/home/users/sit/a104059/scratch/AdaTooler-V/verltool/checkpoints/SDS-GRPO/SDS-GRPO-fsdp-tool-agent-actor_huggingface_/global_step_820 \
+    trainer.resume_mode=auto \
+    # trainer.resume_mode=resume_path \
+    # trainer.resume_from_path=/home/users/sit/a104059/scratch/AdaTooler-V/verltool/checkpoints/SDS-GRPO/SDS-GRPO-fsdp-tool-agent-actor_huggingface_/global_step_820 \
 
 pkill -P -9 $server_pid
 kill -9 $server_pid

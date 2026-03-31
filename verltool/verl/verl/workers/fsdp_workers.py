@@ -285,9 +285,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             AutoConfig,
             AutoModel,
             AutoModelForCausalLM,
-            AutoModelForImageTextToText,
-            AutoModelForVision2Seq,
         )
+
+        try:
+            from transformers import AutoModelForVision2Seq
+        except ImportError:
+            from transformers import AutoModelForImageTextToText as AutoModelForVision2Seq
+        AutoModelForImageTextToText = AutoModelForVision2Seq
 
         from verl.utils.model import get_generation_config, print_model_size, update_model_config
         from verl.utils.torch_dtypes import PrecisionType
