@@ -680,6 +680,7 @@ class AsyncToolServer:
                 http="httptools",
                 timeout_keep_alive=30,
                 backlog=8192, # Increase backlog for high concurrency
+                server_header=False,  # Prevent duplicate 'Server' header (aiohttp 400 error)
             )
         except Exception as e:
             logger.error(f"Failed to start server: {e}")
