@@ -1,0 +1,26 @@
+# SAHA-CF reward knobs (SAHA v3 counterfactual tool-gain).
+#
+# These are passed to the SAHACounterfactualRewardManager constructor via hydra
+# `reward_model.reward_kwargs.*` (see train_qwen3vl_cf_4b.sh, which sets them from
+# env vars). This file is the human-readable record of the defaults and the 4B
+# sweep grid; it is not auto-loaded by hydra.
+
+saha_cf:
+  alpha: 0.6                  # single knob (tool-reward weight). v1-proven default.
+  clip_lo: -0.5               # R_tool lower clip (cap the penalty when a tool hurts)
+  clip_hi: 1.0                # R_tool upper clip (cap the bonus)
+  referring_sref: group_no_tool   # "group_no_tool" | "off" (off => rely on GRPO advantage for referring)
+  min_no_tool: 1              # min same-uid no-tool siblings required to define referring s_ref
+
+# 4B subset sweep grid (run multiple short GRPO runs, pick the winner).
+sweep:
+  alpha: [0.3, 0.6, 1.0]
+  referring_sref: [group_no_tool, off]
+  n_rollout: [2, 4]           # n=4 if referring s_ref proves too sparse at n=2 (spec §2)
+
+# Winner selection criteria (val only, never test), priority order:
+select_by:
+  - outcome_not_degraded         # AR/F1 (grounding) + referring score >= no-tool baseline
+  - healthy_tool_rate            # not collapsed to 0, not always-on; concentrated on hard strata
+  - positive_tool_gain_hard_strata
+  - stable_r_tool_share          # R_tool share of total reward flat over training (no Peak-Then-Collapse)

@@ -19,6 +19,7 @@ functions (unit-tested directly under verl-tool-env); the manager wires them to
 the verl reward-manager API and reuses the v1 outcome/format scorers.
 """
 import json
+import os
 from collections import defaultdict
 from typing import Any
 
@@ -109,12 +110,16 @@ class SAHACounterfactualRewardManager:
         self.num_examine = num_examine
         self.reward_fn_key = reward_fn_key
 
-        # Single knob + calibration (overridable via reward_kwargs in the launcher).
-        self.alpha = float(kwargs.get("alpha", 0.6))
-        self.clip_lo = float(kwargs.get("clip_lo", -0.5))
-        self.clip_hi = float(kwargs.get("clip_hi", 1.0))
-        self.referring_sref = kwargs.get("referring_sref", "group_no_tool")  # or "off"
-        self.min_no_tool = int(kwargs.get("min_no_tool", 1))
+        # Single knob + calibration. Precedence: reward_kwargs (hydra) > SAHA_CF_*
+        # env var > default. The env fallback makes the 4B sweep robust even if the
+        # hydra reward_kwargs add is dropped/struct-blocked for an async worker.
+        self.alpha = float(kwargs.get("alpha", os.environ.get("SAHA_CF_ALPHA", 0.6)))
+        self.clip_lo = float(kwargs.get("clip_lo", os.environ.get("SAHA_CF_CLIP_LO", -0.5)))
+        self.clip_hi = float(kwargs.get("clip_hi", os.environ.get("SAHA_CF_CLIP_HI", 1.0)))
+        self.referring_sref = kwargs.get(
+            "referring_sref", os.environ.get("SAHA_CF_REFERRING_SREF", "group_no_tool")
+        )  # "group_no_tool" or "off"
+        self.min_no_tool = int(kwargs.get("min_no_tool", os.environ.get("SAHA_CF_MIN_NO_TOOL", 1)))
 
         # Pre-warm NLTK WordNet (thread-safety, mirrors sds_grpo.py).
         try:
