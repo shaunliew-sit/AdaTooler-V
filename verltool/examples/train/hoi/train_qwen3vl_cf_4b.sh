@@ -108,7 +108,13 @@ n_gpus_per_node=1
 n_nodes=1
 tensor_model_parallel_size=1
 gpu_memory_utilization=0.45
-do_offload=True
+# This host has only ~62.5 GB system RAM, too small to CPU-offload a 4B optimizer
+# AND params (both-offload peaked at 59.6 GB -> Ray OOM killer). The 96 GB GPU has
+# room, so keep PARAMS ON GPU and offload only the OPTIMIZER to CPU. Verified to
+# clear the host-RAM OOM at init_model (2026-06-15). Override if your host differs.
+PARAM_OFFLOAD=${PARAM_OFFLOAD:-False}
+OPT_OFFLOAD=${OPT_OFFLOAD:-True}
+do_offload=True   # retained for the ref-model path below
 use_dynamic_bsz=True
 ulysses_sequence_parallel_size=1
 fsdp_size=1
@@ -179,8 +185,8 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     actor_rollout_ref.actor.kl_loss_coef=$kl_loss_coef \
     actor_rollout_ref.actor.kl_loss_type=$kl_loss_type \
     actor_rollout_ref.actor.entropy_coeff=$entropy_coeff \
-    actor_rollout_ref.actor.fsdp_config.param_offload=$do_offload \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=$do_offload \
+    actor_rollout_ref.actor.fsdp_config.param_offload=$PARAM_OFFLOAD \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=$OPT_OFFLOAD \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=$fsdp_size \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=$ulysses_sequence_parallel_size \
     actor_rollout_ref.agent.enable_agent=$enable_agent \
@@ -211,7 +217,7 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     actor_rollout_ref.rollout.mode=$rollout_mode \
     actor_rollout_ref.rollout.max_num_batched_tokens=$max_num_batched_tokens \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=$use_dynamic_bsz \
-    actor_rollout_ref.ref.fsdp_config.param_offload=$do_offload \
+    actor_rollout_ref.ref.fsdp_config.param_offload=$PARAM_OFFLOAD \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=$log_prob_micro_batch_size_per_gpu \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=$ulysses_sequence_parallel_size \
     critic.optim.lr=1e-5 \
