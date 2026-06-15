@@ -16,6 +16,7 @@ Usage:
         --max_pairs 15 \
         --filter_len 8192
 """
+import importlib.util
 import json
 import os
 from copy import deepcopy
@@ -25,6 +26,45 @@ from typing import Any
 import datasets
 import fire
 import numpy as np
+
+# SAHA v3: grounding proposal-anchor builder (stdlib-only sibling module). Imported
+# robustly so this works whether prepare_train.py is run as a script or imported.
+try:
+    from proposal_anchor import build_proposal_anchor_grounding
+except ImportError:
+    _pa_spec = importlib.util.spec_from_file_location(
+        "proposal_anchor", str(Path(__file__).resolve().parent / "proposal_anchor.py")
+    )
+    _pa_mod = importlib.util.module_from_spec(_pa_spec)
+    _pa_spec.loader.exec_module(_pa_mod)
+    build_proposal_anchor_grounding = _pa_mod.build_proposal_anchor_grounding
+
+# ---------------------------------------------------------------------------
+# Proposal-decision convention (SAHA v2 Rev 4, latest-decision.md §10.0)
+# ---------------------------------------------------------------------------
+# Single source of truth lives in the reward_manager package
+# (proposal_action.CONVENTION_TEXT). It is loaded by absolute file path via
+# importlib so that this preprocess script does NOT pull in the full training
+# stack (the reward_manager package __init__ imports torch/verl). The block is
+# only appended to prompts when --proposal_action_convention is passed; the
+# default behavior is byte-identical to before.
+
+def _load_convention_text() -> str:
+    """Load CONVENTION_TEXT from proposal_action.py by absolute path (no torch)."""
+    repo_root = Path(__file__).resolve().parents[3]
+    module_path = (
+        repo_root
+        / "verl_tool"
+        / "workers"
+        / "reward_manager"
+        / "proposal_action.py"
+    )
+    spec = importlib.util.spec_from_file_location("_saha_proposal_action", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load proposal_action.py at {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.CONVENTION_TEXT
 
 # ---------------------------------------------------------------------------
 # System prompt — HOI-specific, only zoom tools (no video tools)
@@ -38,7 +78,7 @@ You may call one or more functions to assist with the user query.
 
 You are provided with function signatures within <tools></tools> XML tags:
 <tools>
-{"type": "function", "function": {"name": "zoom_in", "description": "Zoom in on the image based on the bounding box coordinates.", "parameters": {"type": "object", "properties": {"bbox_2d": {"type": "array", "description": "coordinates for bounding box of the area you want to zoom in. minimum value is 0 and maximum value is the width/height of the image.", "items": {"type": "number"}}, "target_image": {"type": "number", "description": "The index of the image to crop. Index from 1 to the number of images. Choose 1 to operate on original image."}}, "required": ["bbox_2d", "target_image"]}}}
+{"type": "function", "function": {"name": "zoom_in", "description": "Zoom in on the image based on the bounding box coordinates.", "parameters": {"type": "object", "properties": {"bbox_2d": {"type": "array", "description": "coordinates for bounding box of the area you want to zoom in, in the same 1000x1000 normalized space as the candidate boxes (minimum value 0, maximum value 1000).", "items": {"type": "number"}}, "target_image": {"type": "number", "description": "The index of the image to crop. Index from 1 to the number of images. Choose 1 to operate on original image."}}, "required": ["bbox_2d", "target_image"]}}}
 {"type": "function", "function": {"name": "zoom_out", "description": "Return to the full original image view after zooming in.", "parameters": {"type": "object", "properties": {}, "required": []}}}
 </tools>
 
@@ -227,6 +267,7 @@ def process_grounding_sample(
     img_dir: str,
     proposals_dir: str,
     dataset_type: str,
+    guideline: str = GROUNDING_GUIDELINE,
 ) -> dict | None:
     """Process a single grounding sample into RL format."""
     file_name = sample["file_name"]
@@ -262,7 +303,7 @@ def process_grounding_sample(
     user_content = GROUNDING_USER_TEMPLATE.format(
         proposals_json=proposals_json,
         query=query,
-        guideline=GROUNDING_GUIDELINE,
+        guideline=guideline,
     )
 
     # Pre-compute SDS
@@ -290,6 +331,8 @@ def process_grounding_sample(
             "task_type": "grounding",
             "spatial_difficulty_score": sds,
             "num_gt_pairs": num_pairs,
+            # SAHA v3: proposal-trust anchor for the counterfactual s_ref (grounding only).
+            "proposal_anchor": build_proposal_anchor_grounding(proposals, boxes_1000, num_pairs),
             "images": [os.path.abspath(img_path)],
             "is_video": False,
         },
@@ -301,6 +344,7 @@ def process_referring_sample(
     img_dir: str,
     proposals_dir: str,
     dataset_type: str,
+    guideline: str = GROUNDING_GUIDELINE,
 ) -> dict | None:
     """Process a single referring sample into RL format."""
     file_name = sample["file_name"]
@@ -337,7 +381,7 @@ def process_referring_sample(
         proposals_json=proposals_json,
         person_json=person_json,
         object_json=object_json,
-        guideline=GROUNDING_GUIDELINE,
+        guideline=guideline,
     )
 
     # Pre-compute SDS (object-area based: object is at index 1 in the pair)
@@ -386,9 +430,18 @@ def main(
     filter_len: int | None = 8192,
     val_size: int = 500,
     seed: int = 42,
+    proposal_action_convention: bool = False,
 ) -> None:
     local_dir_path = Path(local_dir)
     local_dir_path.mkdir(parents=True, exist_ok=True)
+
+    # SAHA v2 Rev 4 (§10.0): optionally append the prompt-level proposal-decision
+    # convention. Default False -> guideline is unchanged and generated prompts
+    # are byte-identical to prior behavior.
+    guideline = GROUNDING_GUIDELINE
+    if proposal_action_convention:
+        guideline = GROUNDING_GUIDELINE + "\n\n" + _load_convention_text()
+        print("Proposal-decision convention ENABLED (appended to task guideline).")
 
     # Define input files
     input_files = [
@@ -420,9 +473,9 @@ def main(
                 continue
 
             if task_type == "grounding":
-                result = process_grounding_sample(sample, img_dir, proposals_dir, dataset_type)
+                result = process_grounding_sample(sample, img_dir, proposals_dir, dataset_type, guideline)
             else:
-                result = process_referring_sample(sample, img_dir, proposals_dir, dataset_type)
+                result = process_referring_sample(sample, img_dir, proposals_dir, dataset_type, guideline)
 
             if result is None:
                 file_stats["skipped_img"] += 1
