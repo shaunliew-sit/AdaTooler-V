@@ -35,6 +35,20 @@ from .sds_grpo import (
 )
 
 
+def compute_sref_grounding(anchor: Any, gt_data: dict) -> float:
+    """Grounding s_ref: score the proposal anchor as if it were the model's answer.
+
+    ``anchor`` is the list of [person_dict, object_dict] pairs built in
+    prepare_train.py (extra_info["proposal_anchor"]). GT-anchored: it depends only
+    on the fixed anchor and the GT, never on policy output -> immune to
+    baseline-depression hacking.
+    """
+    if not anchor:
+        return 0.0
+    lines = "\n".join(json.dumps(pair) for pair in anchor)
+    return compute_grounding_outcome(f"<answer>{lines}</answer>", gt_data)
+
+
 @register("SAHA-CF")
 class SAHACounterfactualRewardManager:
     """Counterfactual tool-gain reward manager (SAHA v3)."""
