@@ -45,6 +45,9 @@ def compute_sref_grounding(anchor: Any, gt_data: dict) -> float:
     baseline-depression hacking.
     """
     if not anchor:
+        # No usable proposal for the target (absent/empty proposal list). s_ref=0
+        # means "proposals do not help here", so a tool that lands a correct answer
+        # is fully credited as genuine recovery (spec §2.1 missing-proposal case).
         return 0.0
     lines = "\n".join(json.dumps(pair) for pair in anchor)
     return compute_grounding_outcome(f"<answer>{lines}</answer>", gt_data)
@@ -226,6 +229,11 @@ class SAHACounterfactualRewardManager:
             r_total = r["r_format"] * (r["r_outcome"] + self.alpha * r_tool)
             accuracy = 1.0 if r["r_outcome"] > 0 else 0.0
 
+            s_ref_defined = s_ref is not None
+            # Unclipped gain (for diagnosing how often the clip binds); 0 when no
+            # tool or no reference.
+            raw_gain = (r["r_outcome"] - s_ref) if (r["i_tool"] and s_ref_defined) else 0.0
+
             score_dict = {
                 "score": r_total,
                 "accuracy": accuracy,
@@ -233,8 +241,13 @@ class SAHACounterfactualRewardManager:
                 "r_outcome": r["r_outcome"],
                 "r_tool": r_tool,
                 "s_final": r["r_outcome"],
-                "s_ref": float(s_ref) if s_ref is not None else float("nan"),
-                "tool_gain": r_tool,
+                # 0.0 (never NaN) when there is no reference, so np.mean over the
+                # logged list stays finite; has_sref separates a real 0.0 reference
+                # (e.g. missing/absent proposal -> recovery case) from "no reference".
+                "s_ref": float(s_ref) if s_ref_defined else 0.0,
+                "has_sref": 1.0 if s_ref_defined else 0.0,
+                "tool_gain_raw": float(raw_gain),
+                "tool_gain_clipped": r_tool,
                 "i_tool": float(r["i_tool"]),
                 "n_zoom_in": float(r["n_zoom_in"]),
                 "n_zoom_out": float(r["n_zoom_out"]),
