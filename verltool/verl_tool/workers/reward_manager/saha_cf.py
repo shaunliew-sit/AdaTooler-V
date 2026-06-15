@@ -49,6 +49,24 @@ def compute_sref_grounding(anchor: Any, gt_data: dict) -> float:
     return compute_grounding_outcome(f"<answer>{lines}</answer>", gt_data)
 
 
+def compute_counterfactual_tool_reward(
+    s_final: float,
+    s_ref: float,
+    i_tool: int,
+    clip_lo: float,
+    clip_hi: float,
+) -> float:
+    """R_tool = I_tool * clip(s_final - s_ref, clip_lo, clip_hi).
+
+    The tool earns reward only when the final answer beats the no-tool/proposal
+    reference. The asymmetric clip keeps R_tool a bounded tie-breaker around
+    R_outcome (Peak-Then-Collapse safeguard). No tool -> 0.0.
+    """
+    if not i_tool:
+        return 0.0
+    return float(min(max(s_final - s_ref, clip_lo), clip_hi))
+
+
 @register("SAHA-CF")
 class SAHACounterfactualRewardManager:
     """Counterfactual tool-gain reward manager (SAHA v3)."""
