@@ -882,9 +882,11 @@ class AgentLoopManager:
         # print(f"Agent Loop Worker max concurrency: {self.config.actor_rollout_ref.agent.max_concurrent_trajectories}")
         self.max_concurrent_trajectories = self.config.actor_rollout_ref.agent.get("max_concurrent_trajectories", None)
         if self.max_concurrent_trajectories is not None:
-            # divide by num_workers to get per-worker concurrency
-            self.config.actor_rollout_ref.agent.max_concurrent_trajectories = (
-                self.max_concurrent_trajectories // num_workers
+            # divide by num_workers to get per-worker concurrency.
+            # Floor at 1: when max_concurrent_trajectories < num_workers (e.g. 4 // 8),
+            # integer division yields 0 -> asyncio.Semaphore(0) deadlocks every trajectory.
+            self.config.actor_rollout_ref.agent.max_concurrent_trajectories = max(
+                1, self.max_concurrent_trajectories // num_workers
             )
             logger.warning(f"Per-Agent Loop Worker max concurrency: {self.config.actor_rollout_ref.agent.max_concurrent_trajectories}")
 

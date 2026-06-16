@@ -41,7 +41,7 @@ fi
 
 # Model — override via first CLI argument.
 # SAHA v3 plan: reuse the v1 SFT (e.g. .../qwen3VL-4B/hoi_v2_sft) for the alpha sweep, scale winner to 8B.
-model_name=${1:-"/workspace/hoi-tool-use-checkpoints/hoi-tool-use-checkpoints/grpo-checkpoints/qwen3vl-sft-grpo-8b/global_step_240"}
+model_name=${1:-"/workspace/hoi-tool-use-checkpoints/sft-checkpoints/qwen3VL-8B"}
 
 # Data (must contain the proposal_anchor field in extra_info)
 train_data=[$(pwd)/data/train.parquet]
@@ -50,7 +50,7 @@ val_data=[$(pwd)/data/val.parquet]
 # RL config
 rl_alg=grpo
 reward_manager=SAHA-CF
-n=4
+n=${N:-6}            # GRPO group size; env-overridable (N=8 ... ) for sweeping
 batch_size=4
 ppo_mini_batch_size=4
 
@@ -112,7 +112,7 @@ log_prob_micro_batch_size_per_gpu=1
 # Misc
 additional_eos_token_ids=[151645]  # <|im_end|>
 max_num_batched_tokens=12288  # must be >= max_prompt_length + max_response_length
-rollout_mode='sync'
+rollout_mode='async'  # MUST be async: sync bypasses the AgentLoopManager so tools never execute
 
 # Run name
 model_pretty_name=$(echo $model_name | tr '[:upper:]' '[:lower:]' | awk -F'/' '{print $(NF-1)"_"$NF}' | tr -c 'a-z0-9_.-' '_')
