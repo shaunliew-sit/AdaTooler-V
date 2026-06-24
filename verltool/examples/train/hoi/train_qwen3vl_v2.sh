@@ -58,8 +58,8 @@ val_data=[$(pwd)/data/val.parquet]
 rl_alg=grpo
 reward_manager=SAHA-CF
 n=${N:-6}            # GRPO group size; env-overridable (N=8 ... ) for sweeping
-batch_size=4
-ppo_mini_batch_size=4
+batch_size=${BATCH_SIZE:-4}              # prompts/step; bigger => more (hard) GRPO groups/step
+ppo_mini_batch_size=${PPO_MINI:-4}
 
 # ── SAHA-CF reward knobs (sweepable via env) ──
 ALPHA=${ALPHA:-0.6}            # single tool-reward weight; sweep {0.3, 0.6, 1.0}
@@ -106,8 +106,8 @@ optimizer_impl=bitsandbytes.optim
 n_gpus_per_node=1
 n_nodes=1
 tensor_model_parallel_size=1
-gpu_memory_utilization=0.30
-do_offload=True
+gpu_memory_utilization=${GPU_MEM:-0.30}
+do_offload=${DO_OFFLOAD:-True}          # H200 143GB fits 8B w/o offload -> drop it for speed (bigger batch)
 use_dynamic_bsz=True
 ulysses_sequence_parallel_size=1
 fsdp_size=-1
@@ -125,11 +125,29 @@ rollout_mode='async'  # MUST be async: sync bypasses the AgentLoopManager so too
 # data_tag distinguishes the s_ref-rebalanced run (2026-06-18) from prior runs so
 # wandb + verl_step_records/<run_name> do NOT mix with the original-data run.
 data_tag="${DATA_TAG:-newsft-resampled}"   # NEW re-SFT'd (collapse-fix) model on resampled data
-run_name="${reward_manager}-a${ALPHA}-${data_tag}"   # e.g. SAHA-CF-a0.6-newsft-resampled
 # Run A (2026-06-24): eval-aligned grounding reward. Default minAR10 (min-IoU, 10 thr);
-# avg2 = frozen v1. Use a distinct DATA_TAG for Run A so wandb/verl_step_records/checkpoints
-# are separate and resume_mode=auto does NOT clobber/resume the original run.
+# avg2 = frozen v1.
 export SAHA_CF_GROUNDING_METRIC=${SAHA_CF_GROUNDING_METRIC:-minAR10}
+run_name="${reward_manager}-a${ALPHA}-${data_tag}"   # e.g. SAHA-CF-a0.6-newsft-resampled
+# SAFETY (stop-review fix): the checkpoint dir is checkpoints/$reward_manager/$run_name and
+# resume_mode=auto silently RESUMES any checkpoint found there. A minAR10 run must therefore
+# NEVER share a run_name with an avg2 run, or it would resume the old reward's optimizer/step
+# and mix metrics. Encode the metric in run_name (idempotent: skip if data_tag already has it,
+# so the live runA-minAR10-* run keeps its name and stays resumable).
+metric_tag=$(echo "$SAHA_CF_GROUNDING_METRIC" | tr '[:upper:]' '[:lower:]')
+if [[ "$(echo "$run_name" | tr '[:upper:]' '[:lower:]')" != *"$metric_tag"* ]]; then
+    run_name="${run_name}-${metric_tag}"
+fi
+# Hard guard: if a checkpoint dir already exists, refuse to resume it under a different metric.
+ckpt_dir="checkpoints/${reward_manager}/${run_name}"
+marker="${ckpt_dir}/.saha_cf_grounding_metric"
+if [[ -f "$marker" ]] && [[ "$(cat "$marker")" != "$metric_tag" ]]; then
+    echo "FATAL: $ckpt_dir was trained with grounding_metric=$(cat "$marker") but this run uses $metric_tag." >&2
+    echo "       Refusing to resume/mix. Use a fresh DATA_TAG or RESUME_MODE=disable." >&2
+    exit 1
+fi
+mkdir -p "$ckpt_dir" && echo "$metric_tag" > "$marker"
+echo "[run_name] $run_name  (grounding_metric=$metric_tag, resume_mode=${RESUME_MODE:-auto})"
 export VERL_RUN_ID=$run_name
 export NCCL_DEBUG=INFO
 export VLLM_USE_V1=1
@@ -248,7 +266,7 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     trainer.test_freq=10 \
     trainer.total_epochs=100 \
     trainer.total_training_steps=${TOTAL_STEPS:-1000} \
-    trainer.resume_mode=auto \
+    trainer.resume_mode=${RESUME_MODE:-auto} \
     # trainer.resume_mode=resume_path \
     # trainer.resume_from_path=.../checkpoints/SAHA-CF/.../global_step_XXX \
 
