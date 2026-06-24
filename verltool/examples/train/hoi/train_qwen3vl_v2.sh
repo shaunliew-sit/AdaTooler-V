@@ -40,11 +40,18 @@ if [[ "$CUDA_VISIBLE_DEVICES" == *"GPU-"* ]]; then
 fi
 
 # Model — override via first CLI argument.
-# SAHA v3 plan: reuse the v1 SFT (e.g. .../qwen3VL-4B/hoi_v2_sft) for the alpha sweep, scale winner to 8B.
-model_name=${1:-"/workspace/hoi-tool-use-checkpoints/sft-checkpoints/qwen3VL-8B"}
+# 2026-06-18: default = the NEW re-SFT'd (LoRA-merged) Qwen3-VL-8B that fixes tool-collapse
+# (teaches zoom->derive-a-better-box; smoke confirmed ~50% zoom on hard cases + correct format).
+# Old v1 SFT was /workspace/hoi-tool-use-checkpoints/sft-checkpoints/qwen3VL-8B (collapsed).
+model_name=${1:-"/workspace/data/qwen3vl-8b-saha-sft-merged"}
 
 # Data (must contain the proposal_anchor field in extra_info)
-train_data=[$(pwd)/data/train.parquet]
+# 2026-06-18: s_ref-rebalanced train set (perfect-anchor grounding down-sampled
+# 58%->30% so the tool-opportunity band s_ref<=0.5 is 64% of grounding; referring
+# down-sampled to preserve the 0.84 task ratio). Built by
+# examples/data_preprocess/hoi/resample_grpo_by_sref.py (seed 42). 281k->170k rows.
+# Revert to data/train.parquet to use the original distribution.
+train_data=[$(pwd)/data/train_resampled_moderate.parquet]
 val_data=[$(pwd)/data/val.parquet]
 
 # RL config
@@ -115,8 +122,14 @@ max_num_batched_tokens=12288  # must be >= max_prompt_length + max_response_leng
 rollout_mode='async'  # MUST be async: sync bypasses the AgentLoopManager so tools never execute
 
 # Run name
-model_pretty_name=$(echo $model_name | tr '[:upper:]' '[:lower:]' | awk -F'/' '{print $(NF-1)"_"$NF}' | tr -c 'a-z0-9_.-' '_')
-run_name="${reward_manager}-a${ALPHA}-${strategy}-tool-agent-${model_pretty_name}"
+# data_tag distinguishes the s_ref-rebalanced run (2026-06-18) from prior runs so
+# wandb + verl_step_records/<run_name> do NOT mix with the original-data run.
+data_tag="${DATA_TAG:-newsft-resampled}"   # NEW re-SFT'd (collapse-fix) model on resampled data
+run_name="${reward_manager}-a${ALPHA}-${data_tag}"   # e.g. SAHA-CF-a0.6-newsft-resampled
+# Run A (2026-06-24): eval-aligned grounding reward. Default minAR10 (min-IoU, 10 thr);
+# avg2 = frozen v1. Use a distinct DATA_TAG for Run A so wandb/verl_step_records/checkpoints
+# are separate and resume_mode=auto does NOT clobber/resume the original run.
+export SAHA_CF_GROUNDING_METRIC=${SAHA_CF_GROUNDING_METRIC:-minAR10}
 export VERL_RUN_ID=$run_name
 export NCCL_DEBUG=INFO
 export VLLM_USE_V1=1
@@ -130,6 +143,9 @@ echo -e -n "$action_stop_tokens" | tee $action_stop_tokens_file
 echo "action_stop_tokens_file=$action_stop_tokens_file"
 
 # Start tool server
+# NOTE: PIXEL_REASONER_BBOX_MODE=grid1000 is exported above (HOI/Qwen3-VL emits bbox in
+# 0-1000 normalized coords). The tool server inherits it and divides crop coords by 1000
+# instead of the native pixel size, so zoom_in lands on the correct region.
 host=$(hostname -i | awk '{print $1}')
 port=$(shuf -i 30000-31000 -n 1)
 tool_server_url=http://$host:$port/get_observation
@@ -192,7 +208,7 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     actor_rollout_ref.agent.action_stop_tokens=$action_stop_tokens_file \
     actor_rollout_ref.agent.enable_mtrl=$enable_mtrl \
     actor_rollout_ref.agent.max_action_length=$max_action_length \
-    actor_rollout_ref.agent.max_concurrent_trajectories=4 \
+    actor_rollout_ref.agent.max_concurrent_trajectories=24 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$tensor_model_parallel_size \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$log_prob_micro_batch_size_per_gpu \
     actor_rollout_ref.rollout.enforce_eager=True \
@@ -231,7 +247,7 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     trainer.save_freq=5 \
     trainer.test_freq=10 \
     trainer.total_epochs=100 \
-    trainer.total_training_steps=1000 \
+    trainer.total_training_steps=${TOTAL_STEPS:-1000} \
     trainer.resume_mode=auto \
     # trainer.resume_mode=resume_path \
     # trainer.resume_from_path=.../checkpoints/SAHA-CF/.../global_step_XXX \

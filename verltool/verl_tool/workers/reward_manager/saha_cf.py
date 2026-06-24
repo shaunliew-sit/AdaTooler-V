@@ -29,29 +29,138 @@ from verl import DataProto
 from verl.workers.reward_manager import register
 
 from .sds_grpo import (
+    calculate_iou,
     compute_format_reward,
     compute_grounding_outcome,
     compute_referring_outcome,
     count_zoom_in,
     count_zoom_out,
+    parse_grounding_answer,
 )
 
 
-def compute_sref_grounding(anchor: Any, gt_data: dict) -> float:
+# ---------------------------------------------------------------------------
+# Run A — eval-aligned grounding scorer (min-IoU, 10 thresholds).
+#
+# The frozen sds_grpo.compute_grounding_outcome scores pairs with an AVERAGED IoU
+# (0.5*person + 0.5*object) at only {0.5, 0.75} — looser than the eval Average
+# Recall, which gates on min(person_iou, object_iou) over 10 thresholds 0.5..0.95
+# (eval_hico_ground_sftgrpo_qwen3vl.py:pair_iou + AR sweep). That mismatch let a
+# tool action that polishes the already-better box earn reward while moving eval
+# AR zero. compute_grounding_outcome_ar mirrors the eval matcher so the reward
+# optimizes what eval measures. Selected via SAHA_CF_GROUNDING_METRIC
+# (minAR10=default | avg2=frozen v1). sds_grpo.py is NOT modified.
+#
+# Residual (documented, out of scope for Run A): the reward scores IoU in the
+# grid-1000 frame (gt_data carries boxes_1000 only, no width/height), while eval
+# scores in pixel space; for non-square images the two IoUs differ slightly.
+# Closing it would need width/height threaded into gt_data via a parquet regen
+# (not a GRPO-only change).
+# ---------------------------------------------------------------------------
+
+_AR_THRESHOLDS = [round(0.5 + 0.05 * i, 2) for i in range(10)]  # 0.50..0.95 (eval AR sweep)
+
+
+def _match_pairs_greedy_min(pred_pairs: list, gt_pairs: list, threshold: float) -> int:
+    """Greedy one-to-one pair match gated on min(person_iou, object_iou) >= threshold.
+
+    Byte-faithful to eval_hico_ground_sftgrpo_qwen3vl.py::match_pairs_greedy
+    (pair_iou = min of the two box IoUs; assign by descending IoU). Returns the
+    matched-pair count.
+    """
+    if not pred_pairs or not gt_pairs:
+        return 0
+    scores: list[tuple[float, int, int]] = []
+    for pi, pred in enumerate(pred_pairs):
+        for gi, gt in enumerate(gt_pairs):
+            person_iou = calculate_iou(pred[0]["bbox_2d"], gt[0]["bbox_2d"])
+            object_iou = calculate_iou(pred[1]["bbox_2d"], gt[1]["bbox_2d"])
+            scores.append((min(person_iou, object_iou), pi, gi))
+    scores.sort(key=lambda x: x[0], reverse=True)
+    matched_pred: set[int] = set()
+    matched_gt: set[int] = set()
+    count = 0
+    for score, pi, gi in scores:
+        if pi in matched_pred or gi in matched_gt:
+            continue
+        if score >= threshold:
+            count += 1
+            matched_pred.add(pi)
+            matched_gt.add(gi)
+    return count
+
+
+def compute_grounding_outcome_ar(pred_text: str, gt_data: dict) -> float:
+    """Grounding outcome = Average Recall over IoU 0.5..0.95 (10 thr), min-IoU pairing.
+
+    Per-sample AR: mean over thresholds of matched/num_gt_pairs. Mirrors the eval
+    AR definition (per-sample recall = tp/(tp+fn) with tp=matched, fn=unmatched_gts).
+    Same parse + GT reconstruction as sds_grpo.compute_grounding_outcome; only the
+    pairing rule (min vs avg) and threshold set ({0.5..0.95} vs {0.5,0.75}) differ.
+    """
+    pred_pairs = parse_grounding_answer(pred_text)
+    boxes_1000 = gt_data.get("boxes_1000", [])
+    num_pairs = gt_data.get("num_pairs", 0)
+
+    gt_pairs: list[list[dict]] = []
+    for i in range(num_pairs):
+        person_idx = i * 2
+        object_idx = i * 2 + 1
+        if object_idx < len(boxes_1000):
+            gt_pairs.append([
+                {"bbox_2d": boxes_1000[person_idx]},
+                {"bbox_2d": boxes_1000[object_idx]},
+            ])
+
+    if not gt_pairs:
+        return 1.0 if not pred_pairs else 0.0
+
+    recalls = [
+        _match_pairs_greedy_min(pred_pairs, gt_pairs, t) / len(gt_pairs)
+        for t in _AR_THRESHOLDS
+    ]
+    return sum(recalls) / len(recalls)
+
+
+def resolve_grounding_scorer(name: str | None = None):
+    """Select the grounding outcome scorer. minAR10 (eval-aligned, default) | avg2 (frozen v1)."""
+    key = (name or os.environ.get("SAHA_CF_GROUNDING_METRIC", "minAR10")).strip().lower()
+    if key in ("minar10", "min_ar10", "ar10", "minar", "min"):
+        return compute_grounding_outcome_ar
+    if key in ("avg2", "avg", "v1", "legacy", "sds"):
+        return compute_grounding_outcome
+    raise ValueError(
+        f"unknown SAHA_CF_GROUNDING_METRIC={key!r} (expected 'minAR10' or 'avg2')"
+    )
+
+
+def compute_sref_grounding(anchor: Any, gt_data: dict, scorer: Any = None) -> float:
     """Grounding s_ref: score the proposal anchor as if it were the model's answer.
 
     ``anchor`` is the list of [person_dict, object_dict] pairs built in
     prepare_train.py (extra_info["proposal_anchor"]). GT-anchored: it depends only
     on the fixed anchor and the GT, never on policy output -> immune to
     baseline-depression hacking.
+
+    ``scorer`` MUST be the same grounding outcome scorer used for s_final, or the
+    counterfactual gain s_final - s_ref would compare two different metrics. Defaults
+    to the env-selected scorer (resolve_grounding_scorer).
     """
-    if not anchor:
+    if scorer is None:
+        scorer = resolve_grounding_scorer()
+    # Robust emptiness check: `not anchor` raises on a numpy-array anchor ("ambiguous truth
+    # value"). At RL time verl delivers native lists (live runs score s_ref fine), but harden
+    # against ndarray inputs from any loader change.
+    if anchor is None or len(anchor) == 0:
         # No usable proposal for the target (absent/empty proposal list). s_ref=0
         # means "proposals do not help here", so a tool that lands a correct answer
         # is fully credited as genuine recovery (spec §2.1 missing-proposal case).
         return 0.0
-    lines = "\n".join(json.dumps(pair) for pair in anchor)
-    return compute_grounding_outcome(f"<answer>{lines}</answer>", gt_data)
+    # `default=` lets json.dumps serialize numpy bbox arrays/scalars (-> .tolist()) without error.
+    lines = "\n".join(
+        json.dumps(pair, default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o))
+        for pair in anchor)
+    return scorer(f"<answer>{lines}</answer>", gt_data)
 
 
 def compute_counterfactual_tool_reward(
@@ -120,6 +229,23 @@ class SAHACounterfactualRewardManager:
             "referring_sref", os.environ.get("SAHA_CF_REFERRING_SREF", "group_no_tool")
         )  # "group_no_tool" or "off"
         self.min_no_tool = int(kwargs.get("min_no_tool", os.environ.get("SAHA_CF_MIN_NO_TOOL", 1)))
+        # Grounding outcome metric: "minAR10" (eval-aligned min-IoU 10-thr, default) | "avg2"
+        # (frozen v1 avg-IoU @{0.5,0.75}). Same scorer drives s_final AND s_ref (Run A).
+        self.grounding_metric = kwargs.get(
+            "grounding_metric", os.environ.get("SAHA_CF_GROUNDING_METRIC", "minAR10")
+        )
+        self.grounding_scorer = resolve_grounding_scorer(self.grounding_metric)
+        print(
+            f"[SAHA-CF] grounding_metric={self.grounding_metric} "
+            f"(scorer={self.grounding_scorer.__name__}) alpha={self.alpha} "
+            f"clip=[{self.clip_lo},{self.clip_hi}]",
+            flush=True,
+        )
+        # Per-call console dashboard (tool-collapse visibility). Logging only;
+        # never affects the reward. Disable with SAHA_CF_LOG_SUMMARY=0.
+        self.log_summary = str(
+            kwargs.get("log_summary", os.environ.get("SAHA_CF_LOG_SUMMARY", "1"))
+        ).lower() not in ("0", "false", "no")
 
         # Pre-warm NLTK WordNet (thread-safety, mirrors sds_grpo.py).
         try:
@@ -177,7 +303,7 @@ class SAHACounterfactualRewardManager:
 
             r_format = compute_format_reward(response_str, task_type)
             if task_type == "grounding":
-                r_outcome = compute_grounding_outcome(response_str, gt_data)
+                r_outcome = self.grounding_scorer(response_str, gt_data)
             else:
                 r_outcome = compute_referring_outcome(response_str, gt_data)
 
@@ -186,7 +312,9 @@ class SAHACounterfactualRewardManager:
             i_tool = 1 if (n_zoom_in + n_zoom_out) > 0 else 0
 
             s_ref_g = (
-                compute_sref_grounding(extra_info.get("proposal_anchor"), gt_data)
+                compute_sref_grounding(
+                    extra_info.get("proposal_anchor"), gt_data, scorer=self.grounding_scorer
+                )
                 if task_type == "grounding"
                 else None
             )
@@ -271,6 +399,41 @@ class SAHACounterfactualRewardManager:
                 print(f"[saha-cf response] {r['response_str'][:200]}...")
                 for key, value in score_dict.items():
                     print(f"[{key}] {value}")
+
+        # ---- per-call tool-collapse dashboard (logging only) ----
+        # Watch `tool_rate` across steps: collapse = it trends to 0. The
+        # counterfactual fix is working when tool_rate stays healthy AND
+        # acc(tool) >= acc(notool) with R_tool|tool > 0 (tools earn reward where
+        # they genuinely beat trusting the proposal).
+        if self.log_summary and len(reward_extra_info.get("i_tool", [])):
+            try:
+                def _col(k):
+                    return np.asarray(reward_extra_info[k], dtype=float)
+
+                def _mean(a, mask=None):
+                    a = a if mask is None else a[mask]
+                    return float(a.mean()) if a.size else float("nan")
+
+                i_tool = _col("i_tool")
+                is_g = _col("is_grounding") > 0.5
+                tool = i_tool > 0.5
+                acc, r_tool = _col("accuracy"), _col("r_tool")
+                gain, s_ref = _col("tool_gain_raw"), _col("s_ref")
+                z_in, z_out = _col("n_zoom_in"), _col("n_zoom_out")
+                print(
+                    f"[SAHA-CF rollout] N={len(i_tool)} "
+                    f"tool_rate={_mean(i_tool):.3f}(g={_mean(i_tool, is_g):.3f} "
+                    f"r={_mean(i_tool, ~is_g):.3f}) | "
+                    f"acc={_mean(acc):.3f} tool={_mean(acc, tool):.3f} "
+                    f"notool={_mean(acc, ~tool):.3f} | "
+                    f"R_tool|tool={_mean(r_tool, tool):.3f} "
+                    f"gain_raw|tool={_mean(gain, tool):.3f} "
+                    f"s_ref|g={_mean(s_ref, is_g):.3f} | "
+                    f"zoom_in={_mean(z_in):.2f} zoom_out={_mean(z_out):.2f}",
+                    flush=True,
+                )
+            except Exception as e:  # logging must never break training
+                print(f"[SAHA-CF rollout] summary skipped: {e}", flush=True)
 
         if return_dict:
             return {
