@@ -147,6 +147,12 @@ if [[ -d "$EXTRA_PYTHONPATH" ]]; then
     export PYTHONPATH="$EXTRA_PYTHONPATH:$PYTHONPATH"
     echo "PYTHONPATH += $EXTRA_PYTHONPATH"
 fi
+# Run THIS copy of the code, whatever `pip install -e` happens to point at.
+# PYTHONPATH precedes site-packages, so a stale editable install elsewhere (e.g.
+# a home-quota failure left it pointing at another checkout) cannot shadow the
+# checkout this job was submitted from.
+export PYTHONPATH="$REPO_ROOT:$REPO_ROOT/verl:$PYTHONPATH"
+echo "PYTHONPATH += $REPO_ROOT and $REPO_ROOT/verl"
 # Ray + tmp on node-local scratch, not the shared filesystem (30s wandb timeout,
 # and Ray's object store is far too slow on NFS).
 export TMPDIR=${TMPDIR:-/tmp/${USER}_${PBS_JOBID%%.*}}
@@ -166,6 +172,7 @@ echo "Knobs:    alpha=$ALPHA n=$N batch=$BATCH_SIZE mini=$PPO_MINI concurrent=$M
 echo ""
 nvidia-smi
 python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA {torch.cuda.is_available()}, GPUs {torch.cuda.device_count()}')"
+python -c "import verl, verl_tool, os; print('verl     ->', os.path.dirname(verl.__file__)); print('verl_tool ->', os.path.dirname(verl_tool.__file__))"
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 echo ""
 
