@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -q ai
 #PBS -N saha-cf-grpo-v2
-#PBS -l select=1:ngpus=1:ncpus=16:mem=240gb
+#PBS -l select=1:ngpus=8:ncpus=64:mem=480gb
 #PBS -l walltime=24:00:00
 #PBS -j oe
 #PBS -P 31100001
@@ -17,15 +17,19 @@
 #   # override any knob without editing the file:
 #   qsub -v ALPHA=0.3,MODEL_SIZE=8b,TOTAL_STEPS=500 examples/train/hoi/train_hoi_grpo_v2.pbs
 #
-# The run is SINGLE-GPU by design (train_qwen3vl_v2.sh sets n_gpus_per_node=1,
-# fsdp_size=-1, do_offload=True), so ngpus=1 is correct — but CPU offload moves
-# the 8B optimizer state to host RAM, hence the large mem= request. Drop to
-# mem=120gb for the 4B model if the queue is busy.
+# 8 GPUs, ONE node. train_qwen3vl_v2.sh defaults to a single GPU (the dev box);
+# NGPUS=8 below scales it: FSDP (fsdp_size=-1) shards the actor across all 8 and
+# TP=1 gives each GPU its own vLLM replica, so the rollout — the slow part, since
+# every trajectory does up to 5 tool turns — runs 8-way data-parallel.
 #
-# WALLTIME: 1000 steps will not finish in 24h. The run checkpoints every 5 steps
-# and train_qwen3vl_v2.sh defaults to resume_mode=auto, so simply re-qsub the
-# same job and it picks up from the last global_step_*. Set AUTO_RESUBMIT=1 to
-# chain automatically.
+# BATCH SIZE IS CONSTRAINED: verl asserts train_batch_size * n % n_gpus == 0
+# (verl/utils/config.py:109). With n=6 on 8 GPUs, BATCH_SIZE must be a multiple
+# of 4. The training script now checks this up front and exits with the rule.
+#
+# WALLTIME: 1000 steps will not finish in 24h even on 8 GPUs. The run checkpoints
+# every 5 steps and train_qwen3vl_v2.sh defaults to resume_mode=auto, so simply
+# re-qsub the same job and it picks up from the last global_step_*. Set
+# AUTO_RESUBMIT=1 to chain automatically.
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -o pipefail
@@ -52,14 +56,43 @@ MODEL_PATH=${MODEL_PATH:-$DATA_ROOT/qwen3vl-${MODEL_SIZE}-saha-sft-merged}
 TRAIN_PARQUET=${TRAIN_PARQUET:-$REPO_ROOT/data/train_resampled_moderate.parquet}
 VAL_PARQUET=${VAL_PARQUET:-$REPO_ROOT/data/val.parquet}
 
+# ── Scale-out knobs (8 GPUs, one node) ──
+export NGPUS=${NGPUS:-8}
+export TP=${TP:-1}                                 # 1 vLLM replica per GPU; raise only if a
+                                                   # single GPU cannot hold the model
+# batch_size*n must be divisible by NGPUS -> with n=6 on 8 GPUs, multiples of 4.
+export BATCH_SIZE=${BATCH_SIZE:-16}                # 4 -> 16: 8x the GPUs, 4x the prompts/step
+export PPO_MINI=${PPO_MINI:-$BATCH_SIZE}           # == batch_size: one optimizer update per step,
+                                                   # same semantics as the tuned 1-GPU run
+export MAX_CONCURRENT=${MAX_CONCURRENT:-96}        # = BATCH_SIZE*N trajectories in flight
+                                                   # (split across rollout.agent.num_workers, default 8)
+export TOOL_WORKERS=${TOOL_WORKERS:-8}             # crop/resize is CPU-bound; 1 worker starves 8 GPUs
+
 # ── SAHA-CF reward knobs (passed through to train_qwen3vl_v2.sh) ──
 export ALPHA=${ALPHA:-0.6}
 export N=${N:-6}
-export BATCH_SIZE=${BATCH_SIZE:-4}
-export PPO_MINI=${PPO_MINI:-4}
-export GPU_MEM=${GPU_MEM:-0.30}
-export DO_OFFLOAD=${DO_OFFLOAD:-True}
 export TOTAL_STEPS=${TOTAL_STEPS:-1000}
+
+# ── CPU offload: decided from the card's memory unless set explicitly ──
+# Offload (params/optimizer to host RAM) is what makes the 8B fit a 40GB card,
+# but it costs a lot of step time. On 80GB+ cards with FSDP sharding across 8
+# GPUs it is unnecessary, and dropping it is the single biggest speedup.
+GPU_MEM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)
+if [[ -z "$DO_OFFLOAD" ]]; then
+    if [[ -n "$GPU_MEM_MB" && "$GPU_MEM_MB" -ge 70000 ]]; then
+        export DO_OFFLOAD=False
+        export GPU_MEM=${GPU_MEM:-0.45}
+        echo "GPU has ${GPU_MEM_MB}MB -> DO_OFFLOAD=False, gpu_memory_utilization=$GPU_MEM"
+    else
+        export DO_OFFLOAD=True
+        export GPU_MEM=${GPU_MEM:-0.30}
+        echo "GPU has ${GPU_MEM_MB:-unknown}MB -> DO_OFFLOAD=True (safe), gpu_memory_utilization=$GPU_MEM"
+    fi
+else
+    export GPU_MEM=${GPU_MEM:-0.30}
+    echo "DO_OFFLOAD=$DO_OFFLOAD (explicit), gpu_memory_utilization=$GPU_MEM"
+fi
+
 export SAHA_CF_GROUNDING_METRIC=${SAHA_CF_GROUNDING_METRIC:-minAR10}
 export DATA_TAG=${DATA_TAG:-newsft-resampled-${MODEL_SIZE}}
 export RESUME_MODE=${RESUME_MODE:-auto}
@@ -67,13 +100,18 @@ export RESUME_MODE=${RESUME_MODE:-auto}
 AUTO_RESUBMIT=${AUTO_RESUBMIT:-0}
 
 # train_qwen3vl_v2.sh defaults to `CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}`
-# (GPU *1* — correct on the multi-GPU dev box). If this site isolates GPUs by cgroup
-# and leaves the variable unset, that default points at a device the job cannot see.
-# Pin it to 0 in that case; if PBS does set it (index or GPU-UUID), leave it alone —
-# the training script already remaps UUIDs to integers for vLLM.
+# — a SINGLE GPU, index 1. On an 8-GPU job that would waste 7 of them, so make the
+# full set explicit. If PBS already set it (indices or GPU-UUIDs) leave it alone;
+# the training script remaps UUIDs to integers for vLLM.
 if [[ -z "$CUDA_VISIBLE_DEVICES" ]]; then
-    export CUDA_VISIBLE_DEVICES=0
-    echo "CUDA_VISIBLE_DEVICES was unset; pinned to 0"
+    export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NGPUS - 1)))
+    echo "CUDA_VISIBLE_DEVICES was unset; pinned to $CUDA_VISIBLE_DEVICES"
+fi
+VISIBLE_COUNT=$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | grep -c .)
+if [[ "$VISIBLE_COUNT" -ne "$NGPUS" ]]; then
+    echo "WARNING: NGPUS=$NGPUS but $VISIBLE_COUNT GPU(s) visible ($CUDA_VISIBLE_DEVICES)." >&2
+    echo "         Ray will request $NGPUS and hang or fail. Aligning NGPUS=$VISIBLE_COUNT." >&2
+    export NGPUS=$VISIBLE_COUNT
 fi
 
 # ── Offline / cache settings (compute nodes have no outbound network) ──
@@ -99,7 +137,8 @@ echo "Date:     $(date)"
 echo "PWD:      $(pwd)"
 echo "Model:    $MODEL_PATH"
 echo "Train:    $TRAIN_PARQUET"
-echo "Knobs:    alpha=$ALPHA n=$N batch=$BATCH_SIZE metric=$SAHA_CF_GROUNDING_METRIC steps=$TOTAL_STEPS"
+echo "Scale:    ngpus=$NGPUS tp=$TP offload=$DO_OFFLOAD gpu_mem=$GPU_MEM tool_workers=$TOOL_WORKERS"
+echo "Knobs:    alpha=$ALPHA n=$N batch=$BATCH_SIZE mini=$PPO_MINI concurrent=$MAX_CONCURRENT metric=$SAHA_CF_GROUNDING_METRIC steps=$TOTAL_STEPS"
 echo ""
 nvidia-smi
 python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA {torch.cuda.is_available()}, GPUs {torch.cuda.device_count()}')"
@@ -177,7 +216,7 @@ echo "=== Training exited rc=$rc at $(date) ==="
 # resume_mode=auto picks up the last checkpoint under checkpoints/SAHA-CF/<run_name>.
 if [[ "$AUTO_RESUBMIT" == "1" && $rc -ne 0 ]]; then
     echo "Resubmitting to continue from the last checkpoint..."
-    qsub -v "AUTO_RESUBMIT=1,ALPHA=$ALPHA,MODEL_SIZE=$MODEL_SIZE,TOTAL_STEPS=$TOTAL_STEPS,DATA_TAG=$DATA_TAG" \
+    qsub -v "AUTO_RESUBMIT=1,ALPHA=$ALPHA,MODEL_SIZE=$MODEL_SIZE,TOTAL_STEPS=$TOTAL_STEPS,DATA_TAG=$DATA_TAG,NGPUS=$NGPUS,BATCH_SIZE=$BATCH_SIZE,PPO_MINI=$PPO_MINI,DO_OFFLOAD=$DO_OFFLOAD,GPU_MEM=$GPU_MEM" \
          "$REPO_ROOT/examples/train/hoi/train_hoi_grpo_v2.pbs"
 fi
 

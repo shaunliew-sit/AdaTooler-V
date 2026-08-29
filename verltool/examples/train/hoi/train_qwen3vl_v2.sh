@@ -103,9 +103,14 @@ optimizer=AdamW8bit
 optimizer_impl=bitsandbytes.optim
 
 # GPU config
-n_gpus_per_node=1
+# NGPUS/TP are env-overridable so the same recipe runs on the single-GPU dev box
+# (defaults) and on an 8-GPU HPC node (NGPUS=8, see train_hoi_grpo_v2.pbs).
+# TP=1 is normally right even on 8 GPUs: each GPU holds a full vLLM replica, so
+# the rollout is 8-way data-parallel (fastest) while FSDP (fsdp_size=-1) still
+# shards the actor's params/optimizer across all 8.
+n_gpus_per_node=${NGPUS:-1}
 n_nodes=1
-tensor_model_parallel_size=1
+tensor_model_parallel_size=${TP:-1}
 gpu_memory_utilization=${GPU_MEM:-0.30}
 do_offload=${DO_OFFLOAD:-True}          # H200 143GB fits 8B w/o offload -> drop it for speed (bigger batch)
 use_dynamic_bsz=True
@@ -120,6 +125,25 @@ log_prob_micro_batch_size_per_gpu=1
 additional_eos_token_ids=[151645]  # <|im_end|>
 max_num_batched_tokens=12288  # must be >= max_prompt_length + max_response_length
 rollout_mode='async'  # MUST be async: sync bypasses the AgentLoopManager so tools never execute
+
+# Agent-loop concurrency: total trajectories in flight across the rollout.
+# AgentLoopManager divides this by rollout.agent.num_workers (verl default 8,
+# max'd with nnodes) for per-worker concurrency, flooring at 1. The default 24 is
+# sized for batch_size=4 (24 trajectories/step); with a bigger batch it becomes
+# the bottleneck, so set it to batch_size*n.
+max_concurrent_trajectories=${MAX_CONCURRENT:-24}
+# Tool-server worker processes (crop/resize is CPU-bound and blocks the rollout).
+tool_workers=${TOOL_WORKERS:-1}
+
+# ── verl batch-size rule (verl/utils/config.py:109) ──
+# real_train_batch_size = train_batch_size * rollout.n must be divisible by n_gpus.
+# Fail here with a readable message rather than deep inside Ray worker init.
+if (( (batch_size * n) % n_gpus_per_node != 0 )); then
+    echo "FATAL: batch_size*n = $((batch_size * n)) is not divisible by n_gpus ($n_gpus_per_node)." >&2
+    echo "       With n=$n on $n_gpus_per_node GPUs, use BATCH_SIZE as a multiple of" \
+         "$(( n_gpus_per_node / $(python3 -c "import math;print(math.gcd($n,$n_gpus_per_node))") ))." >&2
+    exit 1
+fi
 
 # Run name
 # data_tag distinguishes the s_ref-rebalanced run (2026-06-18) from prior runs so
@@ -167,7 +191,7 @@ echo "action_stop_tokens_file=$action_stop_tokens_file"
 host=$(hostname -i | awk '{print $1}')
 port=$(shuf -i 30000-31000 -n 1)
 tool_server_url=http://$host:$port/get_observation
-python -m verl_tool.servers.serve --host $host --port $port --tool_type "pixel_reasoner" --workers_per_tool 1 &
+python -m verl_tool.servers.serve --host $host --port $port --tool_type "pixel_reasoner" --workers_per_tool $tool_workers &
 server_pid=$!
 echo "Tool server (pid=$server_pid) started at $tool_server_url"
 
@@ -226,7 +250,7 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     actor_rollout_ref.agent.action_stop_tokens=$action_stop_tokens_file \
     actor_rollout_ref.agent.enable_mtrl=$enable_mtrl \
     actor_rollout_ref.agent.max_action_length=$max_action_length \
-    actor_rollout_ref.agent.max_concurrent_trajectories=24 \
+    actor_rollout_ref.agent.max_concurrent_trajectories=$max_concurrent_trajectories \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$tensor_model_parallel_size \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$log_prob_micro_batch_size_per_gpu \
     actor_rollout_ref.rollout.enforce_eager=True \
