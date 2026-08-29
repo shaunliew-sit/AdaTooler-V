@@ -53,8 +53,8 @@ conda activate verl-tool-env || { echo "FATAL: conda env verl-tool-env not found
 DATA_ROOT=${DATA_ROOT:-/home/users/sit/a104059/scratch/data}
 MODEL_SIZE=${MODEL_SIZE:-4b}                       # 4b | 8b
 MODEL_PATH=${MODEL_PATH:-$DATA_ROOT/qwen3vl-${MODEL_SIZE}-saha-sft-merged}
-TRAIN_PARQUET=${TRAIN_PARQUET:-$REPO_ROOT/data/train_resampled_moderate.parquet}
-VAL_PARQUET=${VAL_PARQUET:-$REPO_ROOT/data/val.parquet}
+export TRAIN_PARQUET=${TRAIN_PARQUET:-$REPO_ROOT/data/train_resampled_moderate.parquet}
+export VAL_PARQUET=${VAL_PARQUET:-$REPO_ROOT/data/val.parquet}
 
 # ── Scale-out knobs (8 GPUs, one node) ──
 export NGPUS=${NGPUS:-8}

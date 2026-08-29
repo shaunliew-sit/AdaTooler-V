@@ -56,8 +56,10 @@ model_name=${1:-"/workspace/data/qwen3vl-8b-saha-sft-merged"}
 # down-sampled to preserve the 0.84 task ratio). Built by
 # examples/data_preprocess/hoi/resample_grpo_by_sref.py (seed 42). 281k->170k rows.
 # Revert to data/train.parquet to use the original distribution.
-train_data=[$(pwd)/data/train_resampled_moderate.parquet]
-val_data=[$(pwd)/data/val.parquet]
+# Overridable so the PBS wrapper and this script cannot disagree about which
+# parquet is used (TRAIN_PARQUET/VAL_PARQUET are what the PBS pre-flight checks).
+train_data=[${TRAIN_PARQUET:-$(pwd)/data/train_resampled_moderate.parquet}]
+val_data=[${VAL_PARQUET:-$(pwd)/data/val.parquet}]
 
 # RL config
 rl_alg=grpo
