@@ -46,9 +46,19 @@ def plot_movement(im, data, input_width, input_height):
             draw.ellipse([(abs_x - radius, abs_y - radius), (abs_x + radius, abs_y + radius)], fill=color)
     return img
 
-def crop(str_image, bbox_2d, padding=(0.1,0.1)):
+def crop(str_image, bbox_2d, padding=(0.1,0.1), coordinate_scale=None):
     """
     Crop the image based on the bounding box coordinates.
+
+    How `bbox_2d` is interpreted when its values are >= 1 depends on `coordinate_scale`:
+      - None (default): ABSOLUTE PIXEL coordinates of the image itself (Qwen2.5-VL /
+        original Pixel-Reasoner / AdaTooler-V convention). Coords are divided by the
+        native image size.
+      - a number (e.g. 1000): NORMALIZED coordinates on a fixed [0, scale] grid
+        (Qwen3-VL / HOI convention, matching the `boxes_1000` GT and the 0-1000 object
+        proposals). Coords are divided by `coordinate_scale`, independent of the native
+        image size, so the crop lands on the correct region regardless of resolution.
+    bbox values that are all < 1 are always treated as already-normalized 0.0-1.0 fractions.
     """
     if isinstance(str_image, list):
         str_image = str_image[0]
@@ -66,6 +76,9 @@ def crop(str_image, bbox_2d, padding=(0.1,0.1)):
 
     if bbox_2d[0] < 1 and bbox_2d[1] < 1 and bbox_2d[2] < 1 and bbox_2d[3] < 1:
         normalized_bbox_2d = (float(bbox_2d[0])-padding[0], float(bbox_2d[1])-padding[1], float(bbox_2d[2])+padding[0], float(bbox_2d[3])+padding[1])
+    elif coordinate_scale is not None:
+        s = float(coordinate_scale)
+        normalized_bbox_2d = (float(bbox_2d[0])/s-padding[0], float(bbox_2d[1])/s-padding[1], float(bbox_2d[2])/s+padding[0], float(bbox_2d[3])/s+padding[1])
     else:
         normalized_bbox_2d = (float(bbox_2d[0])/img_x-padding[0], float(bbox_2d[1])/img_y-padding[1], float(bbox_2d[2])/img_x+padding[0], float(bbox_2d[3])/img_y+padding[1])
     normalized_x1, normalized_y1, normalized_x2, normalized_y2 = normalized_bbox_2d
@@ -121,6 +134,35 @@ class PixelReasonerTool(BaseTool):
             max_workers=min(32, (os.cpu_count() or 1) + 4),
             thread_name_prefix="image_processor"
         )
+        # Coordinate convention for zoom_in / crop bbox values >= 1 (see crop()), set once
+        # per tool-server process via the PIXEL_REASONER_BBOX_MODE env var:
+        #   "pixel" / "absolute" / unset -> absolute-pixel coords, divide by native image
+        #                                    size (Qwen2.5-VL / AdaTooler-V original behaviour)
+        #   "grid1000"                   -> 0-1000 normalized coords, divide by 1000
+        #                                    (Qwen3-VL / HOI; matches boxes_1000 GT + proposals)
+        #   "grid<N>"                    -> 0-N normalized coords, divide by N
+        # Without this the HOI pipeline divides 0-1000 coords by the native pixel dims, so
+        # every zoom_in lands on the wrong region (off-target sliver crops -> tools useless).
+        bbox_mode = os.environ.get("PIXEL_REASONER_BBOX_MODE", "").strip().lower()
+        self.coordinate_scale = None
+        if bbox_mode and bbox_mode not in ("pixel", "absolute", "px"):
+            if bbox_mode.startswith("grid"):
+                try:
+                    self.coordinate_scale = float(bbox_mode[len("grid"):])
+                except (TypeError, ValueError):
+                    print(f"[PixelReasonerTool] Invalid PIXEL_REASONER_BBOX_MODE={bbox_mode!r} "
+                          f"(expected 'grid<N>', e.g. 'grid1000'); using absolute-pixel coords.")
+                # A non-positive scale would divide-by-zero / invert the box -> ignore it.
+                if self.coordinate_scale is not None and self.coordinate_scale <= 0:
+                    print(f"[PixelReasonerTool] PIXEL_REASONER_BBOX_MODE={bbox_mode!r} gives a "
+                          f"non-positive scale; using absolute-pixel coords.")
+                    self.coordinate_scale = None
+            else:
+                print(f"[PixelReasonerTool] Unknown PIXEL_REASONER_BBOX_MODE={bbox_mode!r}; "
+                      f"using absolute-pixel coords.")
+        mode = (f"0-{self.coordinate_scale:g} normalized grid"
+                if self.coordinate_scale else "absolute pixels")
+        print(f"[PixelReasonerTool] bbox coordinate_scale = {self.coordinate_scale} ({mode})")
 
     def get_usage_inst(self):
         return ""
@@ -200,8 +242,9 @@ class PixelReasonerTool(BaseTool):
 
     async def _process_single_image(self, img_source, bbox_2d):
         """Process a single image crop operation asynchronously."""
+        coordinate_scale = self.coordinate_scale
         def _crop_and_process():
-            cropped_img = crop(img_source, bbox_2d)
+            cropped_img = crop(img_source, bbox_2d, coordinate_scale=coordinate_scale)
             processed_img = process_image({"image": cropped_img})
             return processed_img
         
@@ -210,8 +253,9 @@ class PixelReasonerTool(BaseTool):
 
     async def _process_multiple_images(self, img_sources, bbox_2d=(0, 0, 1, 1)):
         """Process multiple images concurrently."""
+        coordinate_scale = self.coordinate_scale
         def _crop_and_process_single(img_source):
-            cropped_img = crop(img_source, bbox_2d)
+            cropped_img = crop(img_source, bbox_2d, coordinate_scale=coordinate_scale)
             return process_image({"image": cropped_img})
         
         loop = asyncio.get_event_loop()
@@ -251,8 +295,13 @@ class PixelReasonerTool(BaseTool):
                 
                 encoded_cropped_img = encode_image_url(processed_img)
                 image_width, image_height = processed_img.size
+                # Observation string MUST match the SFT (hoi_v2_sft) zoom_in template exactly —
+                # image token first, then the generic caption, NO "(Image Size: WxH)". The SFT
+                # model was distilled on this exact format; any drift makes every zoom_in
+                # observation out-of-distribution at RL time. See pixel_reasoner zoom_out (matches
+                # SFT already) and docs/memory "Layer 5 — template mismatch".
                 observation = {
-                    'obs': f"Here is the cropped image. (Image Size: {image_width}x{image_height})\n<image>",
+                    'obs': "<image>\nHere is the zoomed-in view of the requested region.",
                     'image': encoded_cropped_img,
                 }
                 valid = True

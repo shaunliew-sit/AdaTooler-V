@@ -6,3 +6,6 @@ service-account-gcs.json
 .python-version
 pyproject.toml
 uv.lock
+.env
+src/
+**/__pycache__/

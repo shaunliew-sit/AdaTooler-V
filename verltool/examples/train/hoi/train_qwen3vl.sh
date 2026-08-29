@@ -8,6 +8,7 @@
 # 
 set -x
 unset ROCR_VISIBLE_DEVICES
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}  # override via env: CUDA_VISIBLE_DEVICES=X bash train_qwen3vl.sh
 
 # ── Kill stale Ray actors / GPU contexts from previous failed runs ──
 ray stop --force 2>/dev/null || true
@@ -28,7 +29,7 @@ if [[ "$CUDA_VISIBLE_DEVICES" == *"GPU-"* ]]; then
 fi
 
 # Model — override via first CLI argument
-model_name=${1:-"/workspace/AdaTooler-V/verltool/checkpoints/SDS-GRPO/SDS-GRPO-fsdp-tool-agent-actor_huggingface_/global_step_30/actor/huggingface"}
+model_name=${1:-"/workspace/hoi-tool-use-checkpoints/hoi-tool-use-checkpoints/grpo-checkpoints/qwen3vl-sft-grpo-8b/global_step_240"}
 
 # Data
 train_data=[$(pwd)/data/train.parquet]
@@ -38,8 +39,8 @@ val_data=[$(pwd)/data/val.parquet]
 rl_alg=grpo
 reward_manager=SDS-GRPO
 n=4
-batch_size=18
-ppo_mini_batch_size=18
+batch_size=4
+ppo_mini_batch_size=4
 
 # Sequence lengths
 max_prompt_length=8192
@@ -67,25 +68,27 @@ kl_loss_coef=0.04
 kl_coef=0
 entropy_coeff=0
 kl_loss_type=low_var_kl
+optimizer=AdamW8bit
+optimizer_impl=bitsandbytes.optim
 
 # GPU config
-n_gpus_per_node=3
+n_gpus_per_node=1
 n_nodes=1
 tensor_model_parallel_size=1
-gpu_memory_utilization=0.70
-do_offload=False
+gpu_memory_utilization=0.30
+do_offload=True
 use_dynamic_bsz=True
 ulysses_sequence_parallel_size=1
 fsdp_size=-1
 
 # Micro batch sizes
-ppo_micro_batch_size_per_gpu=12
-log_prob_micro_batch_size_per_gpu=12
+ppo_micro_batch_size_per_gpu=1
+log_prob_micro_batch_size_per_gpu=1
 
 # Misc
 additional_eos_token_ids=[151645]  # <|im_end|>
-max_num_batched_tokens=20000
-rollout_mode='async'
+max_num_batched_tokens=12288  # must be >= max_prompt_length + max_response_length
+rollout_mode='sync'
 
 # Run name
 model_pretty_name=$(echo $model_name | tr '[:upper:]' '[:lower:]' | awk -F'/' '{print $(NF-1)"_"$NF}' | tr -c 'a-z0-9_.-' '_')
@@ -107,7 +110,7 @@ echo "action_stop_tokens_file=$action_stop_tokens_file"
 host=$(hostname -i | awk '{print $1}')
 port=$(shuf -i 30000-31000 -n 1)
 tool_server_url=http://$host:$port/get_observation
-python -m verl_tool.servers.serve --host $host --port $port --tool_type "pixel_reasoner" --workers_per_tool 4 &
+python -m verl_tool.servers.serve --host $host --port $port --tool_type "pixel_reasoner" --workers_per_tool 1 &
 server_pid=$!
 echo "Tool server (pid=$server_pid) started at $tool_server_url"
 
@@ -131,6 +134,8 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.optim.lr=$lr \
     actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
+    actor_rollout_ref.actor.optim.optimizer=$optimizer \
+    actor_rollout_ref.actor.optim.optimizer_impl=$optimizer_impl \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.actor.checkpoint.save_contents=['model','optimizer','extra','hf_model'] \
@@ -159,7 +164,7 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     actor_rollout_ref.agent.action_stop_tokens=$action_stop_tokens_file \
     actor_rollout_ref.agent.enable_mtrl=$enable_mtrl \
     actor_rollout_ref.agent.max_action_length=$max_action_length \
-    actor_rollout_ref.agent.max_concurrent_trajectories=32 \
+    actor_rollout_ref.agent.max_concurrent_trajectories=4 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$tensor_model_parallel_size \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$log_prob_micro_batch_size_per_gpu \
     actor_rollout_ref.rollout.enforce_eager=True \
@@ -182,6 +187,7 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     critic.strategy=$strategy \
     critic.model.path=$model_name \
     critic.model.fsdp_config.fsdp_size=$fsdp_size \
+    critic.model.fsdp_config.param_offload=True \
     critic.ppo_micro_batch_size_per_gpu=$ppo_micro_batch_size_per_gpu \
     critic.ulysses_sequence_parallel_size=$ulysses_sequence_parallel_size \
     algorithm.kl_ctrl.kl_coef=$kl_coef \

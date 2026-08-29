@@ -90,6 +90,23 @@ These were fixes for a drifted env (transformers 5.5.4 / vllm 0.11 / CUDA 13.1).
 
 ---
 
+## WandB monitoring — confirming the tool-collapse fix
+
+The fix for GRPO tool-collapse is the **counterfactual reward** (a useful tool earns `R_outcome + α·gain` → positive *group-relative advantage* exactly where the proposal anchor is weak); AXPO is cite-only, never implemented. To confirm it's working, the trainer logs `saha_cf/*` metrics **per training step** (not just at eval) via `verl_tool/trainer/ppo/metric_util.py::compute_saha_cf_metrics`. The per-step console line `[SAHA-CF rollout] ...` mirrors the headline numbers; `examples/train/hoi/watch_tool_use.py <verl_step_records/RUN>` reconstructs the trend from the rollout dumps.
+
+**The decisive anti-collapse panels (watch these):**
+- **`saha_cf/group_adv_gap_hard` and `saha_cf/group_tool_wins_frac_hard`** — the **true within-GRPO-group** proof. For each prompt's sampled group (shared `uid`, n rollouts) that contains *both* tool and no-tool rollouts, this measures whether the tool side out-advantages its *own* siblings. **Collapse = `group_tool_wins_frac_hard → ~0` and `group_adv_gap_hard ≤ 0`; fix working = `group_adv_gap_hard > 0`, `group_tool_wins_frac_hard` high.** (`n_mixed_groups_hard` shows how many groups qualify; non-hard variants `group_adv_gap`/`group_tool_wins_frac` cover all mixed groups.) This is the metric tied to the AXPO-cited group-advantage framing — it is observability of standard GRPO under the counterfactual reward, **not** an AXPO implementation.
+- `saha_cf/adv_tool_hard` vs `saha_cf/adv_notool_hard`, and `saha_cf/adv_tool_minus_notool` — batch-level **GRPO advantage split by tool use** (aggregate of the above, since GRPO advantage is within-group zero-mean). **Fix working = `adv_tool_hard > adv_notool_hard` (`adv_tool_minus_notool > 0`)**.
+- Inspect concrete groups for any dumped step: `python examples/train/hoi/watch_tool_use.py verl_step_records/<run> --groups <step>` (uses the `uid` + `seq_advantage` now written into the rollout dump).
+- `saha_cf/tool_rate` + strata split `tool_rate_hard` (low `s_ref`) vs `tool_rate_easy` (high `s_ref`) — **COLLAPSE = `tool_rate → 0`.** Healthy = stays up and **concentrated on hard** (`tool_rate_hard` ≫ `tool_rate_easy`).
+- `saha_cf/acc_tool_minus_notool` — tools must not degrade outcome (§sweep crit.1); ≥ 0, positive on hard.
+- `saha_cf/R_tool_share` — tool contribution as a fraction of total reward; **watch it stay FLAT** over training (Peak-Then-Collapse guard, crit.4).
+- `saha_cf/reward_std` — GRPO signal; must stay above the ~0.05 collapse floor.
+
+**Supporting:** `R_tool_given_tool`, `tool_gain_raw_{given_tool,hard_tool}`, `s_ref_grounding`, `n_zoom_in`, `n_zoom_out`, `clip_frac` (how often the asymmetric clip binds), plus validation `val-aux/<source>/{i_tool,r_tool,...}` at `test_freq`. All keys are no-ops unless `reward_manager=SAHA-CF`. Console dashboard off via `SAHA_CF_LOG_SUMMARY=0`.
+
+---
+
 ## Reference
 - Design / mechanism / reviewer rebuttal: `docs/saha-v2/reward-v3-counterfactual-spec.md`
 - Implementation plan + as-built notes: `plan/saha-v3-simple/implementation-plan.md`

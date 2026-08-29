@@ -233,6 +233,21 @@ class AgentRayPPOTrainer(RayPPOTrainer):
                     "request_id",
                     batch.non_tensor_batch["request_id"].tolist(),
                 )
+
+            # GRPO group-sampling proof: record the group id (uid) and the
+            # per-sequence advantage so a dumped step can be inspected group-by-group
+            # (does the tool rollout out-advantage its no-tool siblings?).
+            if "uid" in batch.non_tensor_batch:
+                reward_extra_infos_to_dump.setdefault(
+                    "uid", batch.non_tensor_batch["uid"].tolist()
+                )
+            try:
+                _adv = batch.batch["advantages"]
+                _rm = batch.batch["response_mask"].bool()
+                _seq_adv = ((_adv * _rm).sum(-1) / _rm.sum(-1).clamp(min=1)).detach().float().cpu().tolist()
+                reward_extra_infos_to_dump.setdefault("seq_advantage", _seq_adv)
+            except Exception:
+                pass
             
             tool_interact_info = batch.non_tensor_batch.get('tool_interact_info', None)
             if isinstance(tool_interact_info, np.ndarray):

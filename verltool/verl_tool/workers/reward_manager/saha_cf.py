@@ -1,4 +1,4 @@
-"""SAHA-CF: Proposal-Conditioned Counterfactual Tool-Gain reward manager.
+"""SAHA-CF: Proposal-Relative Tool-Gain (PTG) reward manager.
 
     R_total = R_format * (R_outcome + alpha * R_tool)
     R_tool  = I_tool * clip(s_final - s_ref, clip_lo, clip_hi)
@@ -10,8 +10,15 @@ Where s_ref is the "trust-the-proposal / no-tool" reference:
                (detached constant from the completed batch; min-count guarded).
 
 The tool earns reward only when zooming beats trusting the proposal. This is the
-SAHA v3 reward (docs/saha-v2/reward-v3-counterfactual-spec.md). The frozen
-SDS-GRPO manager (sds_grpo.py) is left untouched as the old-area-SDS baseline.
+SAHA v3 reward (docs/saha-v2/reward-v3-counterfactual-spec.md), named the
+**proposal-relative tool-gain (PTG)** reward in the paper (2026-07-01: the earlier
+name "counterfactual tool-gain / CTG" was dropped because it read as adversarial).
+The mechanism is unchanged. "SAHA-CF" / "CF" (this filename, registry key
+reward_manager="SAHA-CF", env vars SAHA_CF_*, WandB metric prefix saha_cf/*, and
+checkpoint dir names) is a legacy internal identifier for the same reward and is
+kept as-is for checkpoint/metric continuity -- do NOT rename it.
+The frozen SDS-GRPO manager (sds_grpo.py) is left untouched as the old-area-SDS
+baseline.
 
 The three reward helpers below (compute_sref_grounding,
 compute_counterfactual_tool_reward, resolve_referring_sref) are module-level pure
