@@ -1,0 +1,184 @@
+#!/bin/bash
+#PBS -q ai
+#PBS -N saha-cf-grpo-v2
+#PBS -l select=1:ngpus=1:ncpus=16:mem=240gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -P 31100001
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAHA-CF (v3 PTG reward) GRPO on the HPC — PBS wrapper for
+# examples/train/hoi/train_qwen3vl_v2.sh
+#
+# SUBMIT:
+#   cd $SCRATCH/AdaTooler-V/verltool
+#   qsub examples/train/hoi/train_hoi_grpo_v2.pbs
+#
+#   # override any knob without editing the file:
+#   qsub -v ALPHA=0.3,MODEL_SIZE=8b,TOTAL_STEPS=500 examples/train/hoi/train_hoi_grpo_v2.pbs
+#
+# The run is SINGLE-GPU by design (train_qwen3vl_v2.sh sets n_gpus_per_node=1,
+# fsdp_size=-1, do_offload=True), so ngpus=1 is correct — but CPU offload moves
+# the 8B optimizer state to host RAM, hence the large mem= request. Drop to
+# mem=120gb for the 4B model if the queue is busy.
+#
+# WALLTIME: 1000 steps will not finish in 24h. The run checkpoints every 5 steps
+# and train_qwen3vl_v2.sh defaults to resume_mode=auto, so simply re-qsub the
+# same job and it picks up from the last global_step_*. Set AUTO_RESUBMIT=1 to
+# chain automatically.
+# ─────────────────────────────────────────────────────────────────────────────
+
+set -o pipefail
+
+# ── Enter working directory ──
+cd ${PBS_O_WORKDIR:-/home/users/sit/a104059/scratch/AdaTooler-V/verltool} || exit 1
+REPO_ROOT=$(pwd)
+
+# ── Load environment ──
+module load miniforge3
+module load cuda/12.2.2
+module load gcc/11.2.0-nscc
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate verl-tool-env || { echo "FATAL: conda env verl-tool-env not found" >&2; exit 1; }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Paths — EDIT THESE for the HPC filesystem layout.
+# On the dev box these lived under /workspace/data; on NSCC they belong in
+# scratch. Everything below is overridable with `qsub -v NAME=value`.
+# ─────────────────────────────────────────────────────────────────────────────
+DATA_ROOT=${DATA_ROOT:-/home/users/sit/a104059/scratch/data}
+MODEL_SIZE=${MODEL_SIZE:-4b}                       # 4b | 8b
+MODEL_PATH=${MODEL_PATH:-$DATA_ROOT/qwen3vl-${MODEL_SIZE}-saha-sft-merged}
+TRAIN_PARQUET=${TRAIN_PARQUET:-$REPO_ROOT/data/train_resampled_moderate.parquet}
+VAL_PARQUET=${VAL_PARQUET:-$REPO_ROOT/data/val.parquet}
+
+# ── SAHA-CF reward knobs (passed through to train_qwen3vl_v2.sh) ──
+export ALPHA=${ALPHA:-0.6}
+export N=${N:-6}
+export BATCH_SIZE=${BATCH_SIZE:-4}
+export PPO_MINI=${PPO_MINI:-4}
+export GPU_MEM=${GPU_MEM:-0.30}
+export DO_OFFLOAD=${DO_OFFLOAD:-True}
+export TOTAL_STEPS=${TOTAL_STEPS:-1000}
+export SAHA_CF_GROUNDING_METRIC=${SAHA_CF_GROUNDING_METRIC:-minAR10}
+export DATA_TAG=${DATA_TAG:-newsft-resampled-${MODEL_SIZE}}
+export RESUME_MODE=${RESUME_MODE:-auto}
+
+AUTO_RESUBMIT=${AUTO_RESUBMIT:-0}
+
+# train_qwen3vl_v2.sh defaults to `CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}`
+# (GPU *1* — correct on the multi-GPU dev box). If this site isolates GPUs by cgroup
+# and leaves the variable unset, that default points at a device the job cannot see.
+# Pin it to 0 in that case; if PBS does set it (index or GPU-UUID), leave it alone —
+# the training script already remaps UUIDs to integers for vLLM.
+if [[ -z "$CUDA_VISIBLE_DEVICES" ]]; then
+    export CUDA_VISIBLE_DEVICES=0
+    echo "CUDA_VISIBLE_DEVICES was unset; pinned to 0"
+fi
+
+# ── Offline / cache settings (compute nodes have no outbound network) ──
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_HOME=${HF_HOME:-$REPO_ROOT/../.cache/huggingface}
+# wandb cannot reach the internet from a compute node: log offline, sync later
+# from the login node with `wandb sync $WANDB_DIR/wandb/offline-run-*`.
+export WANDB_MODE=${WANDB_MODE:-offline}
+export WANDB_PROJECT=SAHA-CF
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+# Ray + tmp on node-local scratch, not the shared filesystem (30s wandb timeout,
+# and Ray's object store is far too slow on NFS).
+export TMPDIR=${TMPDIR:-/tmp/${USER}_${PBS_JOBID%%.*}}
+mkdir -p "$TMPDIR"
+export RAY_TMPDIR=$TMPDIR
+
+# ── Diagnostics ──
+echo "=== Job Info ==="
+echo "Job ID:   $PBS_JOBID"
+echo "Node:     $(hostname)"
+echo "Date:     $(date)"
+echo "PWD:      $(pwd)"
+echo "Model:    $MODEL_PATH"
+echo "Train:    $TRAIN_PARQUET"
+echo "Knobs:    alpha=$ALPHA n=$N batch=$BATCH_SIZE metric=$SAHA_CF_GROUNDING_METRIC steps=$TOTAL_STEPS"
+echo ""
+nvidia-smi
+python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA {torch.cuda.is_available()}, GPUs {torch.cuda.device_count()}')"
+echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pre-flight — fail in seconds rather than after the model has loaded.
+# ─────────────────────────────────────────────────────────────────────────────
+echo "=== Pre-flight ==="
+fail=0
+for p in "$MODEL_PATH" "$TRAIN_PARQUET" "$VAL_PARQUET"; do
+    if [[ ! -e "$p" ]]; then echo "MISSING: $p" >&2; fail=1; else echo "ok: $p"; fi
+done
+
+# The sitecustomize shim (transformers5 <-> vllm0.11 tokenizer + Triton ptxas)
+# must be installed into site-packages or the vLLM rollout actors die on start.
+python - <<'PY' || fail=1
+import site, os, sys
+p = os.path.join(site.getsitepackages()[0], "sitecustomize.py")
+if not os.path.exists(p):
+    print(f"MISSING: {p}\n  fix: cp patches/sitecustomize_transformers5_vllm.py {p}", file=sys.stderr)
+    sys.exit(1)
+print(f"ok: {p}")
+PY
+
+# The parquet stores ABSOLUTE image paths baked in at data-prep time
+# (/workspace/data/... on the dev box). If they do not resolve here, run:
+#   python examples/data_preprocess/hoi/remap_image_paths.py \
+#       --hico_cluster_dir $DATA_ROOT/hico_20160224_det \
+#       --swig_cluster_dir $DATA_ROOT/swig_hoi --parquet_dir data
+# The reward also needs extra_info.proposal_anchor; without it s_ref silently
+# falls back to 0.0 and R_tool is meaningless.
+TRAIN_PARQUET="$TRAIN_PARQUET" python - <<'PY' || fail=1
+import os, sys, pyarrow.parquet as pq
+f = pq.ParquetFile(os.environ["TRAIN_PARQUET"])
+rows = f.read_row_group(0).slice(0, 200).to_pylist()
+missing = [r["images"][0]["image"] for r in rows
+           if r.get("images") and not os.path.exists(r["images"][0]["image"])]
+if missing:
+    print(f"IMAGE PATHS DO NOT RESOLVE ({len(missing)}/{len(rows)} sampled), e.g.:\n  "
+          + "\n  ".join(missing[:3]) + "\n  fix: remap_image_paths.py (see comment above)",
+          file=sys.stderr)
+    sys.exit(1)
+print(f"ok: images resolve ({len(rows)} sampled)")
+anchored = sum(1 for r in rows if (r.get("extra_info") or {}).get("proposal_anchor"))
+if anchored == 0:
+    print("NO extra_info.proposal_anchor in the parquet -> s_ref would be 0.0 for every "
+          "grounding sample.\n  fix: examples/data_preprocess/hoi/migrate_add_proposal_anchor.py",
+          file=sys.stderr)
+    sys.exit(1)
+print(f"ok: proposal_anchor present ({anchored}/{len(rows)} sampled)")
+PY
+
+[[ $fail -ne 0 ]] && { echo "=== Pre-flight FAILED — not launching ===" >&2; exit 1; }
+echo "=== Pre-flight OK ==="
+echo ""
+
+# ── Clean up Ray / tool-server on any exit path (incl. walltime SIGTERM) ──
+cleanup() {
+    echo "=== Cleanup at $(date) ==="
+    pkill -f "verl_tool.servers.serve" 2>/dev/null
+    ray stop --force 2>/dev/null
+    rm -rf "$TMPDIR" 2>/dev/null
+}
+trap cleanup EXIT TERM INT
+
+# ── Run training ──
+echo "=== Starting SAHA-CF GRPO ==="
+bash examples/train/hoi/train_qwen3vl_v2.sh "$MODEL_PATH"
+rc=$?
+echo "=== Training exited rc=$rc at $(date) ==="
+
+# ── Optional: chain the next job so the run survives the walltime cap ──
+# resume_mode=auto picks up the last checkpoint under checkpoints/SAHA-CF/<run_name>.
+if [[ "$AUTO_RESUBMIT" == "1" && $rc -ne 0 ]]; then
+    echo "Resubmitting to continue from the last checkpoint..."
+    qsub -v "AUTO_RESUBMIT=1,ALPHA=$ALPHA,MODEL_SIZE=$MODEL_SIZE,TOTAL_STEPS=$TOTAL_STEPS,DATA_TAG=$DATA_TAG" \
+         "$REPO_ROOT/examples/train/hoi/train_hoi_grpo_v2.pbs"
+fi
+
+exit $rc
