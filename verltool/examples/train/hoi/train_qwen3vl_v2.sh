@@ -22,8 +22,13 @@ unset ROCR_VISIBLE_DEVICES
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}  # override via env: CUDA_VISIBLE_DEVICES=X bash ...
 
 # ── Kill stale Ray actors / GPU contexts from previous failed runs ──
-ray stop --force 2>/dev/null || true
-sleep 2
+# WARNING: `ray stop --force` is NODE-WIDE for this user -- it kills every Ray
+# process on the host, including a sibling training run. Set SKIP_RAY_STOP=1 when
+# two runs share a node (e.g. an alpha sweep split 4+4 GPUs on one 8-GPU box).
+if [[ "${SKIP_RAY_STOP:-0}" != "1" ]]; then
+    ray stop --force 2>/dev/null || true
+    sleep 2
+fi
 
 # ── Fix PBS UUID-based CUDA_VISIBLE_DEVICES for vllm compatibility ──
 # PBS assigns GPUs as UUIDs (e.g. GPU-4f6613e0-...) but vllm requires integer indices (0,1,2,...)

@@ -99,6 +99,15 @@ export RESUME_MODE=${RESUME_MODE:-auto}
 
 AUTO_RESUBMIT=${AUTO_RESUBMIT:-0}
 
+# CONCURRENT=1: this job shares its node with another training run (e.g. two
+# 4-GPU jobs on one 8-GPU node). Suppresses the node-wide Ray/tool-server kills
+# that would otherwise take the sibling down at startup and at exit.
+CONCURRENT=${CONCURRENT:-0}
+if [[ "$CONCURRENT" == "1" ]]; then
+    export SKIP_RAY_STOP=1
+    echo "CONCURRENT=1 -> SKIP_RAY_STOP=1 (leaving sibling Ray/tool-server alone)"
+fi
+
 # train_qwen3vl_v2.sh defaults to `CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}`
 # — a SINGLE GPU, index 1. On an 8-GPU job that would waste 7 of them, so make the
 # full set explicit. If PBS already set it (indices or GPU-UUIDs) leave it alone;
@@ -200,8 +209,14 @@ echo ""
 # ── Clean up Ray / tool-server on any exit path (incl. walltime SIGTERM) ──
 cleanup() {
     echo "=== Cleanup at $(date) ==="
-    pkill -f "verl_tool.servers.serve" 2>/dev/null
-    ray stop --force 2>/dev/null
+    if [[ "$CONCURRENT" == "1" ]]; then
+        # Sharing the node with a sibling run: a node-wide pkill/ray stop would kill
+        # it too. train_qwen3vl_v2.sh already kills its OWN tool server by pid.
+        echo "CONCURRENT=1 -> skipping node-wide pkill/ray stop"
+    else
+        pkill -f "verl_tool.servers.serve" 2>/dev/null
+        ray stop --force 2>/dev/null
+    fi
     rm -rf "$TMPDIR" 2>/dev/null
 }
 trap cleanup EXIT TERM INT
