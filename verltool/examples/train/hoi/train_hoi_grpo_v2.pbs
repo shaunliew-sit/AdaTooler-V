@@ -54,7 +54,7 @@ conda activate verl-tool-env || { echo "FATAL: conda env verl-tool-env not found
 # models under .../11104496/models{,/merged}.
 DATA_ROOT=${DATA_ROOT:-/home/users/sit/a104059/scratch/11104496/data}
 MODEL_ROOT=${MODEL_ROOT:-/home/users/sit/a104059/scratch/11104496/models}
-MODEL_SIZE=${MODEL_SIZE:-4b}                       # 4b | 8b
+MODEL_SIZE=${MODEL_SIZE:-8b}                       # 4b | 8b -- 8B is the paper's main model
 # Default = the LoRA-merged re-SFT (collapse fix). For the "direct GRPO" ablation
 # (GRPO straight from base, no SAHA SFT) pass the base explicitly, e.g.
 #   qsub -v MODEL_PATH=$MODEL_ROOT/Qwen3-VL-8B-Instruct,DATA_TAG=base8b-nosft ...

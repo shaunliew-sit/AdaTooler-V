@@ -1,9 +1,12 @@
-# SAHA Reward v3 — Proposal-Conditioned Counterfactual Tool-Gain
+# SAHA Reward v3 — Proposal-Relative Tool-Gain (PTG)
+<!-- Paper name = "proposal-relative tool-gain (PTG)". Internal code tag = "SAHA-CF" / "counterfactual" (this filename, registry key, env vars, WandB metrics, checkpoint dirs) — kept for continuity; see the Paper name note below. -->
+<!-- (earlier working title: "Proposal-Conditioned Counterfactual Tool-Gain") -->
 
 **Date:** 2026-06-15
 **Status:** APPROVED design (user, 2026-06-15). Authoritative for the **reward design and GRPO credit only**. Supersedes `docs/saha-v2/latest-decision.md` §8 (6-term reward) and §9.3 (Rung-2 SAN as the collapse fix). Everything else in `latest-decision.md` — proposals, `zoom_in`/`zoom_out`, evaluation protocol, falsification gates, SFT reuse — is retained.
 **Validated by:** web novelty/collision agent + codex code-grounded audit (2026-06-15); outcomes in `plan/saha-v3-simple/notes.md`.
 **Lineage:** prof directive 2026-06-15 — simplify to ≤2 reward variables, ground the tool reward in target-object GT only, make proposals the decision criterion for crowded/occluded scenes, align with the frozen SFT, fix GRPO tool-collapse.
+**Paper name (2026-07-01):** the reward is named the **proposal-relative tool-gain (PTG)** reward in the paper (supervisor asked to drop "counterfactual", which read as adversarial / "against something"). The mechanism in this spec is unchanged. "SAHA-CF", "CF", and "counterfactual" persist ONLY as internal code tags — registry key `reward_manager="SAHA-CF"`, env vars `SAHA_CF_*`, WandB `saha_cf/*`, checkpoint dir names, this filename — and are kept for checkpoint/metric continuity. **Do NOT rename the code identifiers.**
 
 ---
 

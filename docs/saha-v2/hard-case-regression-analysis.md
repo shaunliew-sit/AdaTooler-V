@@ -120,6 +120,25 @@ Run A removes the +0.21 inflation, so any hard gain that now appears is **real a
 
 ---
 
+## 10. Difficulty stratification is metric-dependent (consistency check)
+
+The paper's HARD/EASY split uses `avg2` `s_ref`. Re-bucketing the *same* eval results under the eval-aligned `minAR10` `s_ref` (consistent with the reward and the eval AR):
+
+- The HARD set **expands monotonically** — the `minAR10` HARD set is a strict **superset** of the `avg2` HARD set (`avg2`-HARD ⊆ `minAR10`-HARD), not a re-partition. It quadruples: HICO 11.2% → **49.7%** hard, SWIG 10.6% → **49.7%** (every `avg2`-HARD pair stays HARD; ~7,600 `avg2`-EASY pairs cross the 0.5 threshold into HARD because their `s_ref` drops under the stricter metric; **0** move the other way). Honest statement under the eval metric: **~half of grounding pairs are "hard"** (the proposal mis-localizes at least one box under min-IoU).
+
+| bucket | `s_ref` metric | HICO base | HICO Full | Δ(Full−base) | SWIG base | SWIG Full | Δ |
+|---|---|---|---|---|---|---|---|
+| EASY | avg2 | 37.93 | 38.98 | +1.05 | 41.98 | 32.32 | −9.66 |
+| EASY | **minAR10** | 55.28 | 60.89 | **+5.61** | 55.94 | 48.56 | −7.38 |
+| HARD | avg2 | 5.16 | 4.44 | −0.72 | 7.91 | 1.88 | −6.03 |
+| HARD | **minAR10** | 15.43 | 13.09 | **−2.34** | 20.72 | 9.56 | −11.16 |
+
+**Conclusions (robust to the metric choice):**
+1. The **hard-case regression (base > Full) is real under both metrics** — it is *not* an artifact of the `avg2` stratification; under the consistent metric it is in fact *larger* (HICO −0.72 → −2.34).
+2. On **EASY**, Full's HICO win **grows** under the consistent metric (+1.05 → **+5.61**) — Full clearly helps where the proposal is good.
+3. SWIG trails base in both buckets under both metrics (SFT proposal-dependence collapse + vocab ceiling).
+4. **Recommendation:** either keep `avg2` (with a footnote) or switch the paper's stratification to `minAR10` for consistency with the reward/eval; the substantive story is unchanged, but `minAR10` is more defensible and reframes difficulty honestly (~50% hard). Built by `hoi-benchmarks/compute_sref_cache_minAR10.py` → `sref_cache_minAR10.json`.
+
 ## Appendix — reproduction
 
 - **Eval results analyzed:** `/workspace/hoi-benchmarks/results-sftgrpo/{hico,swig}_{ground,action}_{grpo,sft}/`
