@@ -12,6 +12,7 @@ Usage (run on cluster from verltool/):
         --parquet_dir hoi_rl
 """
 import argparse
+import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -74,17 +75,36 @@ def main():
                         help="Cluster path to swig_hoi root")
     parser.add_argument("--parquet_dir", default="data/hoi",
                         help="Directory containing train.parquet and val.parquet")
+    parser.add_argument("--parquet_files", nargs="*", default=None,
+                        help="Explicit parquet paths to remap. Use this for files not named "
+                             "train/val.parquet (e.g. train_resampled_moderate.parquet), which "
+                             "--parquet_dir would silently skip.")
+    parser.add_argument("--no_backup", action="store_true",
+                        help="Do not write a .pre_remap.bak copy before rewriting in place.")
     args = parser.parse_args()
 
     hico_dir = args.hico_cluster_dir.rstrip("/")
     swig_dir = args.swig_cluster_dir.rstrip("/")
     parquet_dir = Path(args.parquet_dir)
 
-    for split in ["train", "val"]:
-        parquet_path = parquet_dir / f"{split}.parquet"
+    if args.parquet_files:
+        targets = [Path(f) for f in args.parquet_files]
+    else:
+        targets = [parquet_dir / f"{split}.parquet" for split in ["train", "val"]]
+
+    for parquet_path in targets:
         if not parquet_path.exists():
             print(f"Skipping {parquet_path} (not found)")
             continue
+
+        # The rewrite is in place; keep a copy unless explicitly told not to.
+        if not args.no_backup:
+            backup = parquet_path.with_suffix(".pre_remap.bak")
+            if backup.exists():
+                print(f"  Backup already exists, not overwriting: {backup}")
+            else:
+                shutil.copy2(parquet_path, backup)
+                print(f"  Backup: {backup}")
 
         print(f"\nProcessing {parquet_path} ...")
         df = pd.read_parquet(parquet_path)
