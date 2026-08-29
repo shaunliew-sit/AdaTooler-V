@@ -132,6 +132,15 @@ export HF_HOME=${HF_HOME:-$REPO_ROOT/../.cache/huggingface}
 export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_PROJECT=SAHA-CF
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+# Packages installed outside the conda env (pip --target), e.g. flash_attn when
+# the home-filesystem quota refuses the in-env install. Ray propagates the
+# driver env to its actors, so the vLLM rollout workers inherit this too.
+# Skipped silently when the dir does not exist.
+EXTRA_PYTHONPATH=${EXTRA_PYTHONPATH:-/data/projects/11104496/pylibs}
+if [[ -d "$EXTRA_PYTHONPATH" ]]; then
+    export PYTHONPATH="$EXTRA_PYTHONPATH:$PYTHONPATH"
+    echo "PYTHONPATH += $EXTRA_PYTHONPATH"
+fi
 # Ray + tmp on node-local scratch, not the shared filesystem (30s wandb timeout,
 # and Ray's object store is far too slow on NFS).
 export TMPDIR=${TMPDIR:-/tmp/${USER}_${PBS_JOBID%%.*}}
@@ -173,6 +182,12 @@ if not os.path.exists(p):
     sys.exit(1)
 print(f"ok: {p}")
 PY
+
+python -c "import flash_attn" 2>/dev/null && echo "ok: flash_attn importable" || {
+    echo "MISSING: flash_attn (verl needs flash_attn.bert_padding for use_remove_padding)" >&2
+    echo "  fix: pip install --no-deps --target \$EXTRA_PYTHONPATH flash-attn==2.8.3" >&2
+    fail=1
+}
 
 # The parquet stores ABSOLUTE image paths baked in at data-prep time
 # (/workspace/data/... on the dev box). If they do not resolve here, run:
