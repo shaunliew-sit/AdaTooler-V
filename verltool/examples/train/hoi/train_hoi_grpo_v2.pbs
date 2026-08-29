@@ -142,11 +142,15 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 # the home-filesystem quota refuses the in-env install. Ray propagates the
 # driver env to its actors, so the vLLM rollout workers inherit this too.
 # Skipped silently when the dir does not exist.
-EXTRA_PYTHONPATH=${EXTRA_PYTHONPATH:-/data/projects/11104496/pylibs}
-if [[ -d "$EXTRA_PYTHONPATH" ]]; then
-    export PYTHONPATH="$EXTRA_PYTHONPATH:$PYTHONPATH"
-    echo "PYTHONPATH += $EXTRA_PYTHONPATH"
-fi
+# Candidates tried in order; every one that exists is added. Covers both places
+# flash_attn has been --target installed (scratch preferred; /data was the first
+# attempt, and that fileset is full). Override EXTRA_PYTHONPATH to force one.
+for _p in ${EXTRA_PYTHONPATH:-/home/users/sit/a104059/scratch/11104496/pylibs /data/projects/11104496/pylibs}; do
+    if [[ -d "$_p" ]]; then
+        export PYTHONPATH="$_p:$PYTHONPATH"
+        echo "PYTHONPATH += $_p"
+    fi
+done
 # Run THIS copy of the code, whatever `pip install -e` happens to point at.
 # PYTHONPATH precedes site-packages, so a stale editable install elsewhere (e.g.
 # a home-quota failure left it pointing at another checkout) cannot shadow the
