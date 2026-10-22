@@ -27,6 +27,7 @@ the verl reward-manager API and reuses the v1 outcome/format scorers.
 """
 import json
 import os
+import re
 from collections import defaultdict
 from typing import Any
 
@@ -188,6 +189,14 @@ def compute_counterfactual_tool_reward(
     return float(min(max(s_final - s_ref, clip_lo), clip_hi))
 
 
+# The detect tool (plan/saha-detect-tool/PLAN.md §D) counts as tool use, like zoom.
+_DETECT_PATTERN = re.compile(r"<tool_call>\s*\{[^}]*\"name\"\s*:\s*\"detect\"", re.DOTALL)
+
+
+def count_detect(response: str) -> int:
+    return len(_DETECT_PATTERN.findall(response))
+
+
 def resolve_referring_sref(rows: list[dict], min_no_tool: int = 1) -> list:
     """Referring s_ref = mean R_outcome of same-uid NO-TOOL siblings.
 
@@ -236,6 +245,12 @@ class SAHACounterfactualRewardManager:
             "referring_sref", os.environ.get("SAHA_CF_REFERRING_SREF", "group_no_tool")
         )  # "group_no_tool" or "off"
         self.min_no_tool = int(kwargs.get("min_no_tool", os.environ.get("SAHA_CF_MIN_NO_TOOL", 1)))
+        # Grounding s_ref: "anchor" = the selected proposal scored vs GT (proposal-injected
+        # prompts) | "group_no_tool" = same-uid no-tool sibling mean, as for referring
+        # (detect-tool prompts, where proposals are a tool output; PLAN §D, Option A).
+        self.grounding_sref = kwargs.get("grounding_sref", os.environ.get("SAHA_CF_GROUNDING_SREF", "anchor"))
+        if self.grounding_sref not in ("anchor", "group_no_tool"):
+            raise ValueError(f"unknown SAHA_CF_GROUNDING_SREF={self.grounding_sref!r}")
         # Grounding outcome metric: "minAR10" (eval-aligned min-IoU 10-thr, default) | "avg2"
         # (frozen v1 avg-IoU @{0.5,0.75}). Same scorer drives s_final AND s_ref (Run A).
         self.grounding_metric = kwargs.get(
@@ -245,7 +260,7 @@ class SAHACounterfactualRewardManager:
         print(
             f"[SAHA-CF] grounding_metric={self.grounding_metric} "
             f"(scorer={self.grounding_scorer.__name__}) alpha={self.alpha} "
-            f"clip=[{self.clip_lo},{self.clip_hi}]",
+            f"clip=[{self.clip_lo},{self.clip_hi}] grounding_sref={self.grounding_sref}",
             flush=True,
         )
         # Per-call console dashboard (tool-collapse visibility). Logging only;
@@ -262,15 +277,9 @@ class SAHACounterfactualRewardManager:
             pass
 
     def __call__(self, data: DataProto, return_dict: bool = False):
-        if "rm_scores" in data.batch.keys():
-            if return_dict:
-                keys = data.meta_info.get("reward_extra_keys", [])
-                return {
-                    "reward_tensor": data.batch["rm_scores"],
-                    "reward_extra_info": {k: data.non_tensor_batch[k] for k in keys},
-                }
-            return data.batch["rm_scores"]
-
+        # Never reuse the agent loop's rm_scores: it scores each rollout alone (batch of
+        # one), so no same-uid sibling is visible and every sibling s_ref is missing.
+        # The trainer calls this again on the full batch, and that result is the reward.
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info: dict[str, list] = defaultdict(list)
         already_printed: dict[str, int] = {}
@@ -316,7 +325,8 @@ class SAHACounterfactualRewardManager:
 
             n_zoom_in = count_zoom_in(response_str)
             n_zoom_out = count_zoom_out(response_str)
-            i_tool = 1 if (n_zoom_in + n_zoom_out) > 0 else 0
+            n_detect = count_detect(response_str)
+            i_tool = 1 if (n_zoom_in + n_zoom_out + n_detect) > 0 else 0
 
             s_ref_g = (
                 compute_sref_grounding(
@@ -336,22 +346,27 @@ class SAHACounterfactualRewardManager:
                 "i_tool": i_tool,
                 "n_zoom_in": n_zoom_in,
                 "n_zoom_out": n_zoom_out,
+                "n_detect": n_detect,
                 "s_ref_g": s_ref_g,
                 "data_source": data_source,
                 "response_str": response_str,
             })
 
-        # ---- referring s_ref via per-uid no-tool mean (detached) ----
-        ref_rows = [r for r in items if r["task_type"] != "grounding"]
-        if self.referring_sref == "group_no_tool":
-            ref_sref = resolve_referring_sref(ref_rows, self.min_no_tool)
-        else:
-            ref_sref = [None] * len(ref_rows)
-        ref_sref_by_idx = {r["idx"]: s for r, s in zip(ref_rows, ref_sref)}
+        # ---- s_ref via per-uid no-tool mean (detached): referring, plus grounding
+        # under group_no_tool ----
+        # uids never span tasks, so one pass serves both; each task's setting gates
+        # its own rows independently.
+        group_g = self.grounding_sref == "group_no_tool"
+        group_r = self.referring_sref == "group_no_tool"
+        ref_sref_by_idx = {
+            r["idx"]: s
+            for r, s in zip(items, resolve_referring_sref(items, self.min_no_tool))
+            if (group_g if r["task_type"] == "grounding" else group_r)
+        }
 
         # ---- Pass 2: R_tool, R_total, logging, reward tensor ----
         for r in items:
-            if r["task_type"] == "grounding":
+            if r["task_type"] == "grounding" and not group_g:
                 s_ref = r["s_ref_g"] if r["s_ref_g"] is not None else 0.0
                 r_tool = compute_counterfactual_tool_reward(
                     r["r_outcome"], s_ref, r["i_tool"], self.clip_lo, self.clip_hi
@@ -391,6 +406,10 @@ class SAHACounterfactualRewardManager:
                 "i_tool": float(r["i_tool"]),
                 "n_zoom_in": float(r["n_zoom_in"]),
                 "n_zoom_out": float(r["n_zoom_out"]),
+                "n_detect": float(r["n_detect"]),
+                # Proposal-anchor score, kept separate from s_ref so the hard/easy
+                # strata mean the same thing under either grounding_sref mode.
+                "s_anchor": float(r["s_ref_g"]) if r["s_ref_g"] is not None else 0.0,
                 "is_grounding": 1.0 if r["task_type"] == "grounding" else 0.0,
             }
             for key, value in score_dict.items():
@@ -426,7 +445,7 @@ class SAHACounterfactualRewardManager:
                 tool = i_tool > 0.5
                 acc, r_tool = _col("accuracy"), _col("r_tool")
                 gain, s_ref = _col("tool_gain_raw"), _col("s_ref")
-                z_in, z_out = _col("n_zoom_in"), _col("n_zoom_out")
+                z_in, z_out, det = _col("n_zoom_in"), _col("n_zoom_out"), _col("n_detect")
                 print(
                     f"[SAHA-CF rollout] N={len(i_tool)} "
                     f"tool_rate={_mean(i_tool):.3f}(g={_mean(i_tool, is_g):.3f} "
@@ -436,7 +455,9 @@ class SAHACounterfactualRewardManager:
                     f"R_tool|tool={_mean(r_tool, tool):.3f} "
                     f"gain_raw|tool={_mean(gain, tool):.3f} "
                     f"s_ref|g={_mean(s_ref, is_g):.3f} | "
-                    f"zoom_in={_mean(z_in):.2f} zoom_out={_mean(z_out):.2f}",
+                    f"zoom_in={_mean(z_in):.2f} zoom_out={_mean(z_out):.2f} "
+                    f"detect_rate={_mean((det > 0).astype(float)):.3f} "
+                    f"sref_missing|tool={_mean(1.0 - _col('has_sref'), tool):.3f}",
                     flush=True,
                 )
             except Exception as e:  # logging must never break training

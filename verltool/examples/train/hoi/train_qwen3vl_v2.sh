@@ -75,14 +75,18 @@ CLIP_HI=${CLIP_HI:-1.0}
 REFERRING_SREF=${REFERRING_SREF:-group_no_tool}   # or "off" (rely on GRPO advantage for referring)
 MIN_NO_TOOL=${MIN_NO_TOOL:-1}
 # Fallback path: the manager also reads SAHA_CF_* if the hydra reward_kwargs add is dropped.
+# Grounding s_ref: "anchor" (proposal-injected data) | "group_no_tool" (detect-tool data).
+GROUNDING_SREF=${SAHA_CF_GROUNDING_SREF:-anchor}
 export SAHA_CF_ALPHA=$ALPHA SAHA_CF_CLIP_LO=$CLIP_LO SAHA_CF_CLIP_HI=$CLIP_HI \
-       SAHA_CF_REFERRING_SREF=$REFERRING_SREF SAHA_CF_MIN_NO_TOOL=$MIN_NO_TOOL
+       SAHA_CF_REFERRING_SREF=$REFERRING_SREF SAHA_CF_MIN_NO_TOOL=$MIN_NO_TOOL \
+       SAHA_CF_GROUNDING_SREF=$GROUNDING_SREF
 # Keep the zoom_in coordinate fix active for the tool server (1000-grid bboxes).
 export PIXEL_REASONER_BBOX_MODE=grid1000
 
 # Sequence lengths
 max_prompt_length=8192
-max_response_length=4096
+# Detect-tool runs raise this: the detect observation (median 648, max ~3.2k tokens) lands in the response.
+max_response_length=${MAX_RESPONSE_LENGTH:-4096}
 max_action_length=2048
 max_obs_length=8192
 free_cache_engine=True
@@ -130,7 +134,7 @@ log_prob_micro_batch_size_per_gpu=1
 
 # Misc
 additional_eos_token_ids=[151645]  # <|im_end|>
-max_num_batched_tokens=12288  # must be >= max_prompt_length + max_response_length
+max_num_batched_tokens=$(expr $max_prompt_length + $max_response_length)  # must be >= prompt + response
 rollout_mode='async'  # MUST be async: sync bypasses the AgentLoopManager so tools never execute
 
 # Agent-loop concurrency: total trajectories in flight across the rollout.
@@ -223,6 +227,7 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     +reward_model.reward_kwargs.clip_hi=$CLIP_HI \
     +reward_model.reward_kwargs.referring_sref=$REFERRING_SREF \
     +reward_model.reward_kwargs.min_no_tool=$MIN_NO_TOOL \
+    +reward_model.reward_kwargs.grounding_sref=$GROUNDING_SREF \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.optim.lr=$lr \
@@ -293,7 +298,7 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     trainer.rollout_data_dir=$(pwd)/verl_step_records/$run_name \
     trainer.nnodes=$n_nodes \
     +trainer.remove_previous_ckpt_in_save=True \
-    trainer.save_freq=5 \
+    trainer.save_freq=${SAVE_FREQ:-5} \
     trainer.test_freq=10 \
     trainer.total_epochs=100 \
     trainer.total_training_steps=${TOTAL_STEPS:-1000} \
@@ -301,5 +306,11 @@ PYTHONUNBUFFERED=1 python3 -m verl_tool.trainer.main_ppo \
     # trainer.resume_mode=resume_path \
     # trainer.resume_from_path=.../checkpoints/SAHA-CF/.../global_step_XXX \
 
+# Propagate the TRAINER's exit code, not the cleanup kill's. Without this the
+# script always exits 0 (the status of `kill`), so a crashed run reports success
+# to its caller -- the PBS jobs and the local run_grpo_v2_*.sh wrappers alike.
+trainer_rc=$?
+
 pkill -P -9 $server_pid
 kill -9 $server_pid
+exit $trainer_rc

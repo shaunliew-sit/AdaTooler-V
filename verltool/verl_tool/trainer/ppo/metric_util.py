@@ -88,15 +88,19 @@ def compute_saha_cf_metrics(non_tensor_batch: dict, seq_adv=None) -> dict[str, f
         is_g, has_sref, s_ref = arr("is_grounding"), arr("has_sref"), arr("s_ref")
         acc, r_tool, r_out, r_fmt, score = arr("accuracy"), arr("r_tool"), arr("r_outcome"), arr("r_format"), arr("score")
         gain, gain_clip = arr("tool_gain_raw"), arr("tool_gain_clipped")
-        z_in, z_out = arr("n_zoom_in"), arr("n_zoom_out")
+        z_in, z_out, det = arr("n_zoom_in"), arr("n_zoom_out"), arr("n_detect")
+        # Strata key on the proposal-anchor score; s_ref is the no-tool sibling mean in
+        # detect-tool runs (SAHA_CF_GROUNDING_SREF=group_no_tool) and undefined for no-tool rows.
+        s_strata = arr("s_anchor") if "s_anchor" in non_tensor_batch else s_ref
 
         n = len(i_tool)
         false_mask = np.zeros(n, dtype=bool)
         tool = i_tool > 0.5
         g = (is_g > 0.5) if is_g is not None else false_mask
         gsref = (g & (has_sref > 0.5)) if has_sref is not None else g
-        hard = (gsref & (s_ref < 0.5)) if s_ref is not None else false_mask   # weak proposal -> tool should help
-        easy = (gsref & (s_ref >= 0.5)) if s_ref is not None else false_mask  # strong proposal -> tool wasteful
+        strata_rows = g if "s_anchor" in non_tensor_batch else gsref
+        hard = (strata_rows & (s_strata < 0.5)) if s_strata is not None else false_mask   # weak proposal -> tool should help
+        easy = (strata_rows & (s_strata >= 0.5)) if s_strata is not None else false_mask  # strong proposal -> tool wasteful
 
         def mean(a, mask=None):
             if a is None:
@@ -123,6 +127,11 @@ def compute_saha_cf_metrics(non_tensor_batch: dict, seq_adv=None) -> dict[str, f
             "s_ref_grounding": mean(s_ref, gsref),
             "n_zoom_in": mean(z_in),
             "n_zoom_out": mean(z_out),
+            "detect_rate": mean((det > 0).astype(float)) if det is not None else float("nan"),
+            "detect_rate_grounding": mean((det > 0).astype(float), g) if det is not None else float("nan"),
+            "detect_rate_referring": mean((det > 0).astype(float), ~g) if det is not None else float("nan"),
+            "zoom_rate": mean(((z_in + z_out) > 0).astype(float)) if z_in is not None else float("nan"),
+            "sref_missing_frac": mean(1.0 - has_sref, tool) if has_sref is not None else float("nan"),
             "reward_std": float(np.std(score)) if score is not None else float("nan"),
         }
         # GRPO advantage split by tool use — the anti-collapse signal. Positive
