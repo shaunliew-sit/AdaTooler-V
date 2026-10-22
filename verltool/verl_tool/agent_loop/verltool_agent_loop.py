@@ -566,6 +566,11 @@ class VerlToolAgentLoop(AgentLoopBase):
             if do_action and not is_last_step:
                 extra_fields = kwargs.get("extra_info", {}).copy()
                 extra_fields = {}
+                # detect tool: YOLOE must see the original file, not the resized JPEG copy
+                # below (that changes its detections). A path, never GT. PLAN §A.
+                detect_image = (kwargs.get("extra_info") or {}).get("detect_image")
+                if detect_image:
+                    extra_fields["detect_image"] = detect_image
                 if encoded_image_data is not None:
                     extra_fields["images"] = encoded_image_data
                 if encoded_audio_data is not None:

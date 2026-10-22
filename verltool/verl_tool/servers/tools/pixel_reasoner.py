@@ -3,6 +3,7 @@ import regex as re
 import json
 import asyncio
 import concurrent.futures
+import threading
 from typing import Tuple, Union, List, Dict, Any
 import os
 
@@ -89,6 +90,65 @@ def crop(str_image, bbox_2d, padding=(0.1,0.1), coordinate_scale=None):
     cropped_img = image.crop((int(normalized_x1*img_x), int(normalized_y1*img_y), int(normalized_x2*img_x), int(normalized_y2*img_y)))
     return cropped_img
 
+# ---------------------------------------------------------------------------
+# detect: live YOLOE object detector as a tool (SAHA detector-as-a-tool,
+# plan/saha-detect-tool/PLAN.md §A). v1 runs on the full original image only.
+# Settings match the offline proposals the SFT traces were distilled on
+# (saha-hoi/evaluation/generate_proposals.py: yoloe-26l-seg-pf, conf 0.3, max 50).
+# ---------------------------------------------------------------------------
+DETECT_WEIGHTS = os.environ.get("DETECT_TOOL_WEIGHTS", "/workspace/saha-hoi/yoloe-26l-seg-pf.pt")
+DETECT_DEVICE = os.environ.get("DETECT_TOOL_DEVICE", "cpu")
+DETECT_CONF = float(os.environ.get("DETECT_TOOL_CONF", "0.3"))
+DETECT_MAX = int(os.environ.get("DETECT_TOOL_MAX", "50"))
+
+_detector = None
+# The ultralytics predictor is not thread-safe; the tool runs detection on a thread pool.
+_detector_lock = threading.Lock()
+
+
+def _bbox_to_1000(bbox, width, height):
+    """Pixel [x1,y1,x2,y2] -> 0-1000 grid. This rounding reproduces the offline
+    test_proposals the SFT traces were built from (smoke_test_detect_tool.py)."""
+    x1, y1, x2, y2 = bbox
+    return [round(x1 / width * 1000), round(y1 / height * 1000),
+            round(x2 / width * 1000), round(y2 / height * 1000)]
+
+
+def detect_objects(image) -> List[Dict[str, Any]]:
+    """Run YOLOE on an image (path, PIL image or data URL) and return proposals in the
+    prompt format the SFT data used: [{bbox_2d (0-1000), label, confidence, id}]."""
+    global _detector
+    if isinstance(image, (str, Path)) and os.path.exists(str(image)):
+        image = Image.open(image)
+    elif not isinstance(image, Image.Image):
+        image = decode_image_url(image)
+    image = image.convert("RGB")
+    width, height = image.size
+    with _detector_lock:
+        if _detector is None:
+            from ultralytics import YOLO
+            _detector = YOLO(DETECT_WEIGHTS)
+        result = _detector(image, conf=DETECT_CONF, device=DETECT_DEVICE, verbose=False)[0]
+    proposals = []
+    if result.boxes is not None:
+        boxes = result.boxes
+        for i in range(min(len(boxes), DETECT_MAX)):
+            bbox = [int(round(float(v))) for v in boxes.xyxy[i].tolist()]
+            proposals.append({
+                "bbox_2d": _bbox_to_1000(bbox, width, height),
+                "label": result.names.get(int(boxes.cls[i]), f"class_{int(boxes.cls[i])}"),
+                "confidence": round(float(boxes.conf[i]), 2),
+                "id": i,
+            })
+    return proposals
+
+
+def format_detect_observation(proposals: List[Dict[str, Any]]) -> str:
+    """Observation text for a detect call. The SFT rewrite emits exactly this string."""
+    return ("Here are the detected object proposals:\n<candidate_objects>\n"
+            + json.dumps(proposals, indent=2) + "\n</candidate_objects>")
+
+
 def encode_image(img: Image.Image) -> str:
     buffered = io.BytesIO()
     # convert the image to RGB if it is not already
@@ -125,7 +185,7 @@ class PixelReasonerTool(BaseTool):
     tool_type = "pixel_reasoner"
 
     stop_tokens = ["</tool_call>"]
-    valid_mcp_func_names = ['zoom_in', 'crop_image_normalized', 'VideoClip', 'crop_image', 'PathTracer', 'FrameAt', 'zoom_out']
+    valid_mcp_func_names = ['zoom_in', 'crop_image_normalized', 'VideoClip', 'crop_image', 'PathTracer', 'FrameAt', 'zoom_out', 'detect']
 
     def __init__(self, num_workers=1):
         super().__init__(num_workers)
@@ -312,6 +372,25 @@ class PixelReasonerTool(BaseTool):
                 print(f"Error processing zoom-in action: {str(e)}; parameters: {parameters}")
         return observation, valid
     
+    async def conduct_detect_action_async(self, env):
+        """Run the YOLOE detector on the original image (v1: never on a zoomed crop).
+        Text-only observation, so env['images'] and zoom_in target_image indices are
+        unchanged.
+
+        Prefers the original file (`detect_image`, from extra_info): the agent loop's
+        image copy is resized + JPEG re-encoded, which changes YOLOE's detections
+        (smoke_test_detect_tool.py). Falls back to that copy if no path was passed."""
+        source = env.get('detect_image')
+        if source is None and env['images']:
+            print("[PixelReasonerTool] WARNING: detect without extra_info.detect_image; running YOLOE "
+                  "on the resized JPEG copy, whose detections differ from the original file's.")
+            source = env['images'][0]
+        if source is None:
+            return "No image available to run the detector on.", False
+        loop = asyncio.get_event_loop()
+        proposals = await loop.run_in_executor(self.image_executor, detect_objects, source)
+        return format_detect_observation(proposals), True
+
     async def conduct_VideoClip_action_async(self, parameters, env):
         """
         Execute the select frames action asynchronously with concurrent processing.
@@ -452,6 +531,8 @@ class PixelReasonerTool(BaseTool):
         env = self.load_env(trajectory_id)
         if env['images'] is None:
             env['images'] = [Path(x) if not x.startswith("data:image") else decode_image_url(x) for x in extra_field.get('images', [])]
+        if extra_field.get('detect_image') and not env.get('detect_image'):
+            env['detect_image'] = extra_field['detect_image']
         
         if not is_valid:
             observation = ""
@@ -497,6 +578,13 @@ class PixelReasonerTool(BaseTool):
             elif parsed_action['name'] == 'zoom_out':
                 observation = "Returned to the full original image view."
                 valid = True
+            elif parsed_action['name'] == 'detect':
+                try:
+                    observation, valid = await self.conduct_detect_action_async(env)
+                except Exception as e:
+                    observation = f"Error processing detect action: {str(e)}"
+                    valid = False
+                    print(f"Error processing detect action: {str(e)}")
             else:
                 observation = "Unknown action name."
                 valid = False
