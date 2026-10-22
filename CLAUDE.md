@@ -2,41 +2,30 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## ⚡ ACTIVE PLAN: SAHA v2 — Proposal-Aware Evidence Difficulty (ACCV 2026, submission 5 Jul 2026)
+## ⚡ ACTIVE PLAN: SAHA — Detector as a Tool (post-ACCV pivot, decided 2026-10-21)
 
-This repo is now the training codebase for the **SAHA ACCV 2026 revision**. Before ANY code change, read in order:
-
-1. `docs/saha-v2/reward-v3-counterfactual-spec.md` — **THE authoritative reward/credit design (2026-06-15, approved). Wins on reward, GRPO credit, and the crowded/occluded mechanism.** Reward v3 = `R_format·(R_outcome + α·R_tool)`, the **proposal-relative tool-gain (PTG)** reward (paper name; internal code tag "counterfactual"/SAHA-CF — see naming note below), replaces the Rev-4 6-term reward.
-2. `docs/saha-v2/latest-decision.md` — Rev 4 spec. Authoritative for everything **non-reward** (proposals, eval protocol, falsification gates, SFT reuse, novelty map). Where it conflicts with the v3 spec on reward/credit, the v3 spec wins.
-3. `docs/saha-v2/adatooler-v-reading-note.md` — before touching reward code (novelty differentiation).
-4. `plan/saha-v3-simple/` — design notes + implementation plan for the v3 reward.
+ACCV 2026 **rejected** the proposal-injected SAHA (meta-review: the formulation removes HOI *discovery* because YOLOE proposals were fed in offline, and gains don't generalise to SWIG). **New direction (prof + user, 2026-10-21):** the YOLOE detector becomes a **tool** the policy calls when it decides to (v1: full image only; detect-on-crop deferred). **Before ANY code change, read `plan/saha-detect-tool/PLAN.md`.** It holds the decisions (D1–D4), the verified facts, the component list and the work order.
 
 **Hard constraints (any session, any agent):**
-- Keep external object-region proposals (YOLOE) and proposal injection.
-- Active tools = `zoom_in` and `zoom_out` ONLY. Never implement/register `inspect_pose` or any new tool.
-- Never switch to detector-free. Never implement AXPO (cite-only).
-- Never claim a new GRPO algorithm; never write "unbiased" without a derivation.
-- Never adopt AT-GRPO's `ΔS · exp(−γ(·)²)` reward as the main method — it exists only as the labeled baseline (`reward_manager=AdaTooler-V`, latest-decision §11.7).
-- **Reward = `R_format·(R_outcome + α·R_tool)`, ONE knob α** (v3 spec §2). `R_tool = I_tool·clip(s_final − s_ref)` is a counterfactual tool-gain grounded ONLY in target-object GT (grounding `s_ref` = selected proposal anchor scored vs target GT; referring `s_ref` = detached per-`uid` no-tool mean). **Never** reintroduce the Rev-4 6-term reward (`R_proposal_correction/decision/bad_copy/redundant`), per-factor SDS-v2 reward weights, or the `proposal_action` (trust/correct/reject) verbalization — the frozen SFT cannot emit it (R6 gate). **Paper name (2026-07-01):** this reward is the **proposal-relative tool-gain (PTG)** reward in the paper — "counterfactual tool-gain / CTG" was dropped (supervisor: "counterfactual" reads as adversarial). The mechanism is unchanged; below, "counterfactual" is just the mechanism descriptor. "counterfactual", "CF", "SAHA-CF", `saha_cf`, `SAHA_CF_*`, `saha_cf/*` stay as INTERNAL code/registry/metric/checkpoint tags — do NOT rename them (breaks checkpoint resume + WandB history).
-- SDS-v2 factors (`D_size, D_occlusion, D_contact, D_proposal, D_scene`) are **EVAL-ONLY** stratification axes now — NOT reward terms. Do not wire them into the reward.
-- No GT leakage: GT (target box, proposal-quality strata) is training/eval-only; inference prompts use model-observable proposal signals only.
-- REUSE the v1 SFT checkpoint. NEVER start SFT trace generation without a recorded human decision (latest-decision §10.0).
-- **GRPO tool-collapse fix = the counterfactual reward itself + standard GRPO advantage (default).** The two-stratum tool/no-tool SAN (cite Stratified GRPO 2510.06214) is an **ABLATION only** — never run it together with the counterfactual reward as the default (it double-centers the tool-vs-no-tool contrast).
-- Work order (v3): one-time **parquet re-run** to thread the proposal anchor into `extra_info` → reward helpers + two-pass `__call__` + per-rollout logging → smoke tests → **4B SFT + balanced subset** reward sweep (`α`, clip, referring-`s_ref` variant) → pick winner → scale to 8B. Plan in `plan/saha-v3-simple/`.
-- Stop and report missing paths/fields; never silently invent a different method.
+- **Tools = `detect`, `zoom_in`, `zoom_out`.** `detect()` (no arguments, full original image in v1) runs **live** YOLOE-26l prompt-free (`yoloe-26l-seg-pf.pt`, conf 0.3, max 50) inside the tool server at train AND test time, and returns boxes in the ORIGINAL image's 0–1000 grid. Never inject offline proposals into detect-tool prompts. No other new tools (no `inspect_pose`, no text-prompted detector) without a recorded decision.
+- Scope = the current tasks (HOI grounding + action referring, with the person/object boxes still given). The mAP / image-only triplet evaluation is deferred (D1), not dropped.
+- **Reward = `R_format·(R_outcome + α·R_tool)`, ONE knob α.** `R_tool = I_tool·clip(s_final − s_ref)`. `I_tool` counts detect, zoom_in and zoom_out. In detect-tool runs `s_ref` = the detached mean `R_outcome` of same-`uid` **no-tool** siblings for BOTH tasks (Option A, `SAHA_CF_GROUNDING_SREF=group_no_tool`). No sibling → `R_tool=0`; log `sref_missing_frac`.
+  - Never reintroduce the Rev-4 6-term reward, per-factor SDS-v2 weights, the `proposal_action` verbalization, or a per-call cost term (second knob).
+  - Paper name: proposal-relative tool-gain (PTG); its wording must be revisited now that proposals are a tool output. `SAHA-CF`, `saha_cf`, `SAHA_CF_*` and `saha_cf/*` stay as INTERNAL tags; do NOT rename them (checkpoint resume + WandB history).
+- **SFT = reuse the existing traces** (`/workspace/data/hoi_sft_final`, 3,547) through a deterministic rewrite: the prompt loses its proposals; grounding traces and proposal-referencing referring traces get a `detect` call + observation carrying the original YOLOE JSON. Add paired no-detect grounding traces by rejection sampling, then retrain the LoRA. The sampler is an SFT model, not the base model, which could not produce usable answers (approved 2026-10-22). The current set came from `qwen3vl-8b-saha-sft-merged`; any re-sampling uses the detect-tool SFT (`qwen3vl-8b-saha-detect-sft-merged`). The old proposal-injected runs are dropped; all new training and eval use the detect-tool model. **NEVER run a new teacher (gpt-5.5) trace generation without a recorded human decision.**
+- GRPO tool-collapse fix = the tool-gain reward + standard GRPO advantage. The stratified tool/no-tool SAN is an ablation only. Never implement AXPO (cite-only). Never claim a new GRPO algorithm; never write "unbiased" without a derivation. AT-GRPO's `ΔS·exp(−γ(·)²)` exists only as the labeled baseline (`reward_manager=AdaTooler-V`).
+- No GT leakage: GT is training/eval-only. The tool server never receives GT. `extra_info.proposal_anchor` is kept for eval/metric stratification only. SDS-v2 factors are eval-only stratification axes.
+- Keep the old pipelines runnable as baselines: `sds_grpo.py` (old area-SDS, frozen, untouched), proposal-injected SAHA-CF (`SAHA_CF_GROUNDING_SREF=anchor`, `data/{train,val}.parquet`), `AdaTooler-V.py`. Detect-tool data goes to NEW files (`*_detect.parquet`, `/workspace/data/hoi_sft_detect`); never overwrite the old ones.
+- **Env:** `ultralytics==8.4.183` is in `/workspace/envs/verl-tool-env`, installed `--no-deps`. Never `pip install ultralytics` plainly: it pulls numpy 2 + opencv 5 and breaks verl. `pip check` flagging `opencv-python` is expected, because `opencv-python-headless` provides cv2.
+- Every implementation step gets an independent Codex check through Herdr before the next step. Stop and report missing paths/fields; never silently invent a different method.
 
-**Status of the existing pipelines under SAHA v2:**
-- `sds_grpo.py` (`reward_manager=SDS-GRPO`, area-only SDS, `R_format×(R_outcome+0.6·R_tool)`) is now the **"old area-SDS" baseline row** (spec §11.4). Keep it registered, runnable, and untouched. Note: the `tests/test_sds_grpo.py` suite cited by `reward_design.md` was never committed — Wave-1 task B0 (execution-plan §2-B) recreates it from the documented verified values before other code lands.
-- `AdaTooler-V.py` (`reward_manager=AdaTooler-V`) is the **optional AT-GRPO-style baseline** (spec §11.7). Never the default.
-- The SAHA method (**v3 reward, 2026-06-15**) = a NEW/updated reward manager implementing the §2 counterfactual tool-gain (`docs/saha-v2/reward-v3-counterfactual-spec.md`). The GRPO tool-collapse fix is the **counterfactual reward** (a useful tool earns `R_outcome + α·gain` → positive group advantage exactly where the proposal anchor is low), NOT a SAN — the SAN is an ablation only. SDS-v2 factor library is retained eval-only. Train on 4B SFT + balanced subset first; scale the winning reward config to 8B.
+**Previous plan (history; superseded on proposals/tools, the grounding `s_ref` (anchor → no-tool siblings) and the SFT data (rewritten for detect)):** SAHA v2/v3 proposal-injected PTG reward. See `docs/saha-v2/reward-v3-counterfactual-spec.md`, `docs/saha-v2/latest-decision.md`, `plan/saha-v3-simple/`, and `docs/saha-v2/meeting-notes-prof-2026-06-26.md` (what the hard-case evidence did and did not show). Monitoring still applies: `saha_cf/*` WandB metrics via `verl_tool/trainer/ppo/metric_util.py::compute_saha_cf_metrics`, `examples/train/hoi/watch_tool_use.py`, and `docs/saha-v2/SAHA-CF-RUNBOOK.md`. The parquet `proposal_anchor` migration is documented in `examples/data_preprocess/hoi/migrate_add_proposal_anchor.py`.
 
-**SAHA-CF data note (2026-06-15):** `data/{train,val}.parquet` on this machine were the SDS-GRPO-era parquets and **lacked `extra_info["proposal_anchor"]`** (SAHA-CF's grounding `s_ref` input). Because the raw **train** proposals are not on this box (only `test_proposals` under `/workspace/hoi-tool-use-checkpoints/`), the field was **reconstructed in place** by `examples/data_preprocess/hoi/migrate_add_proposal_anchor.py` rather than via a full `prepare_train.py` regen. The migration parses the prompt-embedded `<candidate_objects>` proposals + GT boxes and calls the same `build_proposal_anchor_grounding`, so it is **exact** (byte-identical to a regen) — it rewrites only the `extra_info` struct, all other columns untouched. Result: train 128,125/128,129 grounding anchors built (4 empty, 0 parse/GT errors), val 445/445; originals backed up to `*.pre_saha_cf.bak`. If raw train proposals ever land here, a full regen remains the canonical path. **Lesson: a reward that reads a new `extra_info` field requires a parquet that carries it — and `saha_cf.compute_sref_grounding` fails *silently* (`s_ref=0.0`) when it's missing, so verify the field before training.** Smoke test: `python examples/train/hoi/smoke_test_saha_cf.py`.
+**Drift checks (run before claiming done):**
+- `rg -n "inspect_pose|detector-free" verltool/ --type py` → nothing active
+- `rg -n "Delta S|Tool Benefit|AT-GRPO|AdaTooler" verltool/ --type py` → `AdaTooler-V.py` + docs only
 
-**SAHA-CF tool-collapse monitoring (2026-06-15):** the counterfactual-reward collapse-fix is confirmable live. Per-step **WandB training** metrics are logged under `saha_cf/*` by `verl_tool/trainer/ppo/metric_util.py::compute_saha_cf_metrics` (no-op unless `reward_manager=SAHA-CF`); the decisive panel is the **within-GRPO-group** proof `saha_cf/group_adv_gap_hard` + `group_tool_wins_frac_hard` (does the tool rollout out-advantage its *own* no-tool siblings on low-`s_ref` groups? >0 / high = collapse counteracted), with batch-level `adv_tool_hard` vs `adv_notool_hard` as the aggregate, plus `tool_rate{,_hard,_easy}`, `acc_tool_minus_notool`, `R_tool_share`, `reward_std`. Inspect raw groups: `watch_tool_use.py <RUN> --groups <step>` (dump now carries `uid` + `seq_advantage`). Also a per-step console line `[SAHA-CF rollout] …` (in `saha_cf.py`, disable `SAHA_CF_LOG_SUMMARY=0`) and a trend tool `examples/train/hoi/watch_tool_use.py <verl_step_records/RUN>`. Full reading guide in `docs/saha-v2/SAHA-CF-RUNBOOK.md` §"WandB monitoring". AXPO stays cite-only — these are observability of the existing counterfactual reward + standard GRPO advantage, not a new algorithm.
-
-**Drift checks (run before claiming done):** `rg -n "inspect_pose|detector-free" verltool/ --type py` → nothing active; `rg -n "Delta S|Tool Benefit|AT-GRPO|AdaTooler" verltool/ --type py` → `AdaTooler-V.py` + docs only; `rg -rn "prepare_sft|trace_gen|generate_traces" --type py verltool/` → empty.
-
-**Sibling repos:** `/workspace/hoi/saha-hoi` (SAHA v1 code), `/workspace/hoi/hoi-benchmarks` (eval harness — gate run + DetZoom + eval modes live there), `/workspace/hoi/checkpoints` (shared model checkpoints). Spec source-of-truth mirror: `paper-reading/saha-reference-notes/`.
+**Sibling repos:** `/workspace/saha-hoi` (SAHA v1 code; YOLOE weights `yoloe-26l-seg-pf.pt`), `/workspace/hoi-benchmarks` (eval harness; needs a detect-tool mode, see PLAN §E), `/workspace/hoi-tool-use-checkpoints` (shared checkpoints: `base-checkpoints/`, `sft-checkpoints/`, `grpo-checkpoints/`; `test_proposals/` = old offline YOLOE output). SFT runs in `/workspace/LlamaFactory` (env `/workspace/envs/llamafactory`).
 
 ---
 
@@ -55,6 +44,8 @@ pip install -e verl
 pip install -e ".[vllm,acecoder,torl,search_tool]"
 pip install "flash-attn==2.8.3" --no-build-isolation
 ```
+
+**This machine (8×H200, driver 550, 2026-10-21):** the env lives on the persistent volume at `/workspace/envs/verl-tool-env` (the container's `/opt/conda` is wiped when the container is removed). Activate it with `conda activate /workspace/envs/verl-tool-env`. Rebuild it with `bash verltool/scripts/setup_verl_tool_env.sh`, which installs exact versions from `verltool/scripts/verl_tool_env.lock.txt` (a pip freeze of the verified env: torch 2.8.0+cu128, vllm 0.11.0, transformers 4.57.6, numpy 1.26.4) plus the sha-pinned flash-attn 2.8.3 wheel. Unpinned pip pulls transformers 5 / numpy 2, which break verl. After an intentional upgrade, regenerate the lockfile. The script creates the env from conda-forge only, so no conda ToS prompt. It first recreates the image symlink `/media/shaun/workspace/hoi/dataset → /workspace/data`, which the parquets' absolute image paths need. It lives on the container overlay and disappears with the container.
 
 ## Key Commands
 
@@ -86,12 +77,8 @@ Requires 8x H100/A100 GPUs (80GB). Uses GRPO with `n=8`, batch size 32, tensor p
 cd verltool
 bash examples/train/hoi/train_qwen3vl.sh /path/to/sft_model
 ```
-Script as committed assumes multi-GPU (3 GPUs/node). **SAHA v2 compute reality (2026-06-12): ONE NVIDIA RTX PRO 6000 Blackwell Max-Q (96 GB).** A proven single-GPU recipe exists at `/workspace/hoi/saha-hoi/verltool/examples/train/hoi/train_saha_hoi_grpo_single_gpu.sh` (full fine-tune + CPU offload `do_offload=True`, n=2, batch 2, micro-batch 1, `gpu_memory_utilization=0.45` — NOT LoRA); porting it here (default ckpt → `hoi_v2_sft`, reward → `SAHA-V2`) + a 1-step memory smoke test are post-gate work items (execution-plan R7 / OD-2b).
-SAHA v2 decisions (2026-06-12, recorded in `docs/saha-v2/execution-plan.md`):
-- SFT checkpoint reused per spec §10.0: `/workspace/hoi/checkpoints/qwen3VL-8B/hoi_v2_sft` (Qwen3-VL-8B, full SFT, eval loss 0.442). Training restarts from this SFT.
-- `qwen3VL-8B-SFT-GRPO/global_step_240` = previous-generation trained model, NOT in this lineage; gate rows R3–R6 run on `hoi_v2_sft` ("SFT-only current behavior"). Older 2B/4B checkpoints are previous iterations.
-- Gate-run grounding scorer = current proposals-eval convention (both-pass + avg-IoU rank), min-IoU secondary where cheap.
-- zoom_in coordinate question (risk R6) is settled by the A-7 smoke test, then a human decides — never fix silently.
+Script as committed assumes multi-GPU (3 GPUs/node). **Compute (2026-10-21): this machine has 8×H200 (shared; pick idle GPUs).** The current local launcher is `examples/train/hoi/run_grpo_v2_alpha0.sh` (proposal-injected SAHA SFT model). Detect-tool runs will use `run_grpo_detect_tool.sh` (PLAN §F).
+**Checkpoints (2026-10-21):** the SAHA SFT used by recent GRPO runs is the LoRA SFT on `/workspace/data/hoi_sft_final` merged into `/workspace/data/qwen3vl-{4b,8b}-saha-sft-merged`. `/workspace/hoi-tool-use-checkpoints/sft-checkpoints/qwen3VL-{4B,8B}` (`hoi_v2_sft`, full SFT, 8B eval loss 0.442) is the older lineage. Detect-tool runs start from a NEW LoRA SFT on the rewritten data (PLAN §C), not from either.
 
 ### Evaluation
 ```bash
@@ -143,7 +130,7 @@ AdaTooler-V/
 **Reward Managers** (`verl_tool/workers/reward_manager/`): Primary managers:
 - `AdaTooler-V.py` — AT-GRPO reward: calculates Tool Benefit Scores and adaptively scales rewards (original pipeline; under SAHA v2 this is the optional labeled baseline, spec §11.7).
 - `sds_grpo.py` — SDS-GRPO reward for HOI tasks: `R_total = R_format * (R_outcome + alpha * R_tool)`. Uses Spatial Difficulty Score (SDS) gated on object bounding-box area to decide when zoom_in/zoom_out tool use should be rewarded or penalized. Registered as `"SDS-GRPO"`. Under SAHA v2 this is the frozen "old area-SDS" baseline (spec §11.4) — do not modify it.
-- `sds_v2.py` + `saha_v2.py` (PLANNED, Phases B/C — see `docs/saha-v2/execution-plan.md`) — SDS-v2 factor library and the proposal-first SAHA v2 reward (`R_task + λ_corr·R_proposal_correction + λ_dec·R_proposal_decision + λ_tool·R_useful_tool_evidence − λ_red·R_redundant_tool_use − λ_copy·R_bad_proposal_copy`, normalize-then-sum, all terms logged per rollout).
+- `saha_cf.py` (`reward_manager=SAHA-CF`) — the SAHA tool-gain reward `R_format·(R_outcome + α·R_tool)`. Proposal-injected runs use the grounding anchor `s_ref`; detect-tool runs use same-uid no-tool siblings (PLAN §D). The Rev-4 six-term `saha_v2` reward was never adopted and must not be built.
 
 Other reward managers exist for different tasks (torl, acecoder, sqlcoder, etc.).
 
