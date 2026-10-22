@@ -153,7 +153,7 @@ Rationale (both validators, decisive): vanilla GRPO advantage already subtracts 
 
 ## 8. Experiment Plan
 
-- **Substrate:** resume GRPO from `/workspace/hoi/checkpoints/qwen3VL-4B/hoi_v2_sft` on a **balanced ~2–3k subset** (stratify by scene crowding / proposal quality so hard cases aren't washed out).
+- **Substrate:** resume GRPO from `/workspace/hoi-tool-use-checkpoints/sft-checkpoints/qwen3VL-4B` on a **balanced ~2–3k subset** (stratify by scene crowding / proposal quality so hard cases aren't washed out).
 - **Sweep (parallel/sequential short runs on one 96 GB GPU):** `α ∈ {0.3, 0.6, 1.0}`, clip bounds, grounding-anchor mode, referring-`s_ref` variant. Single-GPU recipe: full FT + CPU offload, n=2, batch 2.
 - **Selection:** winner by val outcome (AR/F1, referring score) **and** tool-gain on hard strata, with a non-collapsed tool-rate curve.
 - **Scale:** promote the winning reward config to 8B (`qwen3VL-8B/hoi_v2_sft`) for the final tables.

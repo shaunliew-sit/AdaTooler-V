@@ -11,7 +11,7 @@
 ## Locked forks (user, 2026-06-15)
 1. Tool reward = **counterfactual gain** (outcome-grounded, target-GT only).
 2. Reward form = **old multiplicative** `R_format·(R_outcome + α·R_tool)` (one knob α).
-3. Substrate = **4B SFT + subset** (`/workspace/hoi/checkpoints/qwen3VL-4B/hoi_v2_sft`).
+3. Substrate = **4B SFT + subset** (`/workspace/hoi-tool-use-checkpoints/sft-checkpoints/qwen3VL-4B`).
 
 ## Reward design
 ```

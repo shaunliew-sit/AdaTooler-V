@@ -554,9 +554,9 @@ saha_cf:
 
 ```bash
 # verltool/examples/train/hoi/train_qwen3vl_cf_4b.sh
-# Derived from /workspace/hoi/saha-hoi/.../train_saha_hoi_grpo_single_gpu.sh
+# Derived from /workspace/saha-hoi/.../train_saha_hoi_grpo_single_gpu.sh
 # Key overrides only:
-#   actor_rollout_ref.model.path=/workspace/hoi/checkpoints/qwen3VL-4B/hoi_v2_sft
+#   actor_rollout_ref.model.path=/workspace/hoi-tool-use-checkpoints/sft-checkpoints/qwen3VL-4B
 #   reward_model.reward_manager=SAHA-CF
 #   +reward_model.reward_kwargs.alpha=${ALPHA:-0.6}
 #   +reward_model.reward_kwargs.referring_sref=${REF_SREF:-group_no_tool}

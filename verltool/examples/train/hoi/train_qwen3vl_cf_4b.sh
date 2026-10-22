@@ -2,7 +2,7 @@
 # SAHA-CF (v3 counterfactual tool-gain) — 4B single-GPU sweep launcher.
 #
 # Derived from the proven single-GPU recipe
-# (/workspace/hoi/saha-hoi/.../train_saha_hoi_grpo_single_gpu.sh): full fine-tune
+# (/workspace/saha-hoi/.../train_saha_hoi_grpo_single_gpu.sh): full fine-tune
 # + CPU offload, n=2, batch 2, gpu_memory_utilization=0.45 on one 96 GB GPU.
 # Changes vs that recipe: reward_manager=SAHA-CF, 4B SFT default, subset data,
 # reward_kwargs (alpha/clip/referring_sref) threaded through, grid1000 zoom fix.
@@ -35,7 +35,7 @@ if [[ "$CUDA_VISIBLE_DEVICES" == *"GPU-"* ]]; then
 fi
 
 # Model — 4B SFT cold-start by default (same lineage as the 8B hoi_v2_sft).
-DEFAULT_SFT_CKPT=/workspace/hoi/checkpoints/qwen3VL-4B/hoi_v2_sft
+DEFAULT_SFT_CKPT=/workspace/hoi-tool-use-checkpoints/sft-checkpoints/qwen3VL-4B
 if [[ $# -ge 1 && "$1" != *"="* ]]; then
     model_name="$1"; shift; extra_overrides=("$@")
 else
