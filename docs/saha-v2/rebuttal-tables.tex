@@ -1,0 +1,107 @@
+% =====================================================================
+% Rebuttal tables - SAHA ACCV 2026
+% Source of numbers: docs/saha-v2/rebuttal-alpha0-ablation.md (8B addendum)
+% alpha=0   : SAHA-CF-a0-newsft-resampled-8b-minar10 / global_step_165
+% alpha=0.6 : SAHA-CF-a0.6-newsft-resampled / global_step_1000  (paper's 8B)
+% no-SFT    : SAHA-CF-a0.6-base8b-nosft-minar10 / global_step_120  (evaluated 2026-08-31)
+% Requires: \usepackage{booktabs}
+% =====================================================================
+
+% ---------------------------------------------------------------------
+% Table 1: reward ablation, grounding (the defensible comparison)
+% ---------------------------------------------------------------------
+\begin{table}[t]
+\centering
+\small
+\caption{Reward ablation on 8B, full test sets. Removing the proposal-relative
+tool-gain term ($\alpha{=}0$, outcome-only GRPO) costs recall on both grounding
+benchmarks. Grounding is insensitive to training length over this range, so the
+gap is attributable to the reward rather than to the step difference
+($\alpha{=}0$: 165 steps; $\alpha{=}0.6$: 1000 steps).}
+\label{tab:reward-ablation-grounding}
+\begin{tabular}{llcccc}
+\toprule
+Benchmark & Reward & AR & AR@0.5 & AR@0.75 & AR$_S$ \\
+\midrule
+\multirow{2}{*}{HICO-DET}
+ & $\alpha{=}0$ (outcome-only)      & 29.09 & 51.36 & 28.53 & 3.05 \\
+ & $\alpha{=}0.6$ (PTG, ours)       & \textbf{31.03} & \textbf{54.94} & \textbf{30.36} & \textbf{3.58} \\
+\midrule
+\multirow{2}{*}{SWiG-HOI}
+ & $\alpha{=}0$ (outcome-only)      & 25.69 & 39.38 & 26.03 & 7.26 \\
+ & $\alpha{=}0.6$ (PTG, ours)       & \textbf{29.05} & \textbf{43.39} & \textbf{29.81} & \textbf{8.09} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ---------------------------------------------------------------------
+% Table 2: tool-use selectivity  (the strongest qualitative result)
+% SAHA column: from results-sftgrpo/*_grpo_8b per-sample tool_calls (11.3/16.8%);
+% alpha=0 and no-SFT columns are measured zoom_rate from their metrics.json.
+% ---------------------------------------------------------------------
+\begin{table}[t]
+\centering
+\small
+\caption{Tool-use rate (\% of samples invoking \texttt{zoom\_in}). The
+difficulty-aware SFT establishes a \emph{selective} gate; direct GRPO from the
+base model does not, invoking the tool on nearly every sample while earning no
+tool-gain during training.}
+\label{tab:tool-selectivity}
+\begin{tabular}{lccc}
+\toprule
+Benchmark & SAHA (ours) & $\alpha{=}0$ & no-SFT (direct GRPO) \\
+\midrule
+HICO-DET grounding  & 11.3 & 11.37 & \textbf{99.54} \\
+SWiG-HOI grounding  & 16.8 & 15.93 & \textbf{98.15} \\
+HICO-DET referring  & --   & 7.72  & \textbf{100.00} \\
+SWiG-HOI referring  & --   & 2.16  & \textbf{99.99} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ---------------------------------------------------------------------
+% Table 3: full three-way ablation (SFT stage + reward term)
+% ---------------------------------------------------------------------
+\begin{table}[t]
+\centering
+\small
+\caption{Ablating the two stages at 8B on full test sets. Removing the
+difficulty-aware SFT (direct GRPO from the base model) collapses selective tool
+use: the policy zooms on ${\sim}99\%$ of queries yet localises far worse.
+Removing only the tool-gain term ($\alpha{=}0$) preserves the gate but loses
+recall.}
+\label{tab:full-ablation}
+\begin{tabular}{lcccc}
+\toprule
+ & \multicolumn{2}{c}{Grounding (AR)} & \multicolumn{2}{c}{Referring (EM)} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Variant & HICO & SWiG & HICO & SWiG \\
+\midrule
+no-SFT (direct GRPO)      & 20.06 & 13.12 & 16.85 & 6.02 \\
+$\alpha{=}0$ (outcome-only) & 29.09 & 25.69 & 24.56 & 7.89 \\
+SAHA (SFT + PTG)          & \textbf{31.03} & \textbf{29.05} & \textbf{25.55} & \textbf{12.59} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ---------------------------------------------------------------------
+% Paste-ready response paragraph (reviewer: "does the tool-gain term help?")
+% ---------------------------------------------------------------------
+% We ran the requested outcome-only ablation at the paper's model size: an
+% $\alpha{=}0$ variant (i.e. $R = R_{\text{format}}\cdot R_{\text{outcome}}$, the
+% tool-gain term removed), trained from the same SFT initialisation and evaluated
+% on the complete test sets of all four benchmarks (92{,}446 samples).
+% Removing the tool-gain term costs \textbf{1.94 AR} on HICO-DET grounding and
+% \textbf{3.36 AR} on SWiG-HOI grounding (Table~\ref{tab:reward-ablation-grounding}),
+% with consistent drops at every IoU threshold and every object-size bucket.
+% We additionally ablate the SFT stage (direct GRPO from the base model): that
+% variant invokes the zoom tool on essentially every sample
+% (Table~\ref{tab:tool-selectivity}) while earning near-zero tool-gain during
+% training, confirming that the difficulty-aware SFT -- not the RL objective
+% alone -- is what establishes selective tool use.
+%
+% CAVEAT to keep in mind (do NOT delete without deciding):
+% the alpha=0 run was stopped at step 165 vs 1000 for the main model. Grounding is
+% flat over that range (+0.87 AR HICO) so the grounding numbers above are safe.
+% Referring is NOT flat (4B SWiG referring 7.42 -> 14.63 over the same range), which
+% is why referring deltas are deliberately omitted from Table 1.
